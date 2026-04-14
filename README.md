@@ -1,16 +1,22 @@
-# EasyInteractive
+[English](README.en.md) | 中文
+
+# 简单交互系统
 一个统一处理 **3D 物体** 和 **UI 元素**交互事件的系统，支持聚焦（Focus）、点击（Click）、拖拽（Drag）三种核心交互。
+
 **并未完全测试，目前基本功能可以正常使用**
+
 **建议配合Odin一起使用。不然配置起来比较麻烦**
+
 ---
 **注意：我提供了Odin，想商用或是有能力的话请支持正版。**
+
 ---
 ## 核心思路
 
 系统的核心是把"交互逻辑"从 MonoBehaviour 里抽出来，做成独立的 **Behaviour 类**挂到容器上。
 
 ```
-EasyInteractiveNew（单例）
+InteractionSystem（单例）
     ↓ 每帧 Raycast / EventSystem 检测
 IInteractableTarget（统一接口）
     ├── InteractableObject      → 3D 物体容器（Physics Raycast）
@@ -21,7 +27,7 @@ IInteractableTarget（统一接口）
         └── InteractableUIBehaviour      → UI 行为（EventSystem 驱动）
 ```
 
-EasyInteractive 只认 `IInteractableTarget`，不关心来源是物理射线还是 UI 事件，**3D 和 UI 走同一套派发逻辑**。
+InteractionSystem 只认 `IInteractableTarget`，不关心来源是物理射线还是 UI 事件，**3D 和 UI 走同一套派发逻辑**。
 
 ---
 
@@ -69,19 +75,20 @@ EasyInteractive 只认 `IInteractableTarget`，不关心来源是物理射线还
 
 ## 关键机制
 
-### Behaviour 的全局开关
+### Behaviour全局开关
 每个 Behaviour 类型都有一个全局启用状态（`_behaviourState`），可以整批开关某类行为：
 
 ```csharp
-EasyInteractiveNew.Instance.DisableBehaviourType(typeof(MyDragBehaviour));
+InteractionSystem.Instance.DisableBehaviourType(typeof(MyDragBehaviour));
 ```
+每个物体上也可以单独控制某个行为是否开启。
 
 ### 3D 输入（InputSettings）
 `InteractableThreeDBehaviour` 支持配置多组 `InputAction`，每帧轮询是否触发。  
 点击/拖拽的"按下"/"持续"/"松开"分别对应 `Pressed / Held / Released`，可灵活绑定任意按键。
 
 ### UI 输入
-`InteractableUIElement` 实现了 Unity EventSystem 的各类接口（`IPointerEnterHandler` 等），收到事件后直接转发给 `EasyInteractiveNew`，与 3D 走相同的派发路径。
+`InteractableUIElement` 实现了 Unity EventSystem 的各类接口（`IPointerEnterHandler` 等），收到事件后直接转发给 `InteractionSystem`，与 3D 走相同的派发路径。
 
 ### Raycast 策略
 - 优先普通 `RaycastNonAlloc`
@@ -89,6 +96,7 @@ EasyInteractiveNew.Instance.DisableBehaviourType(typeof(MyDragBehaviour));
 - 命中排序后，**跳过正在被拖拽的物体自身**，取下一个作为聚焦目标，实现"拖着东西悬停到目标上"的场景
 
 ---
+资源包里有示例场景
 
 ## 快速上手
 
@@ -158,7 +166,7 @@ public class UIButtonBehaviour : InteractableUIBehaviour, IClickable
 
 ## 场景配置
 
-1. 场景中放一个空物体，挂上 `EasyInteractiveNew`
+1. 场景中放一个空物体，挂上 `InteractionSystem`
 2. 3D 物体：继承 `InteractableObject`，在 Inspector 添加 Behaviour
 3. UI 元素：挂 `InteractableUIElement`，在 Inspector 添加 Behaviour
 4. 确保场景有 `EventSystem`（UI 支持必须）

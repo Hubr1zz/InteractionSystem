@@ -1,0 +1,28 @@
+{
+  "name": "com.hubrizz.interaction-system",
+  "version": "2.1.0",
+  "displayName": "Mouse Interaction System",
+  "description": "An Odin-serialized modular behaviour host with deterministic hover, click, drag and drop dispatch for Unity 3D and uGUI objects.",
+  "unity": "2022.3",
+  "dependencies": {
+    "com.unity.ugui": "1.0.0"
+  },
+  "keywords": [
+    "interaction",
+    "mouse",
+    "drag-and-drop",
+    "ugui",
+    "odin-inspector"
+  ],
+  "author": {
+    "name": "Hubrizz"
+  },
+  "samples": [
+    {
+      "displayName": "Basic Drag and Drop",
+      "description": "Minimal component examples for hover, click, drag, and drop.",
+      "path": "Samples~/Basic"
+    }
+  ],
+  "license": "MIT"
+}

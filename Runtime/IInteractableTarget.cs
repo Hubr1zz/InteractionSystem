@@ -3,16 +3,14 @@ using UnityEngine;
 
 namespace InteractionSystem.Runtime
 {
-    /// <summary>
-    /// Unified container interface for both 3D (InteractableObject) and UI (InteractableUIElement) targets.
-    /// EasyInteractive operates exclusively on this interface — source (Physics vs EventSystem) is irrelevant to dispatch.
-    /// </summary>
     public interface IInteractableTarget
     {
         GameObject gameObject { get; }
-        List<InteractableBehaviourBase> interactableBehaviours { get; }
-        List<IClickable>                clickableBehaviours    { get; }
-        List<IDraggableBase>            draggableBehaviours    { get; }
-        List<IFocusableBase>            focusableBehaviours    { get; }
+        bool InteractionEnabled { get; }
+        IReadOnlyList<IHoverHandler> HoverHandlers { get; }
+        IReadOnlyList<IClickHandler> ClickHandlers { get; }
+        IReadOnlyList<IDragHandler> DragHandlers { get; }
+        IReadOnlyList<IDropHandler> DropHandlers { get; }
+        bool TryGetBehaviour<T>(out T behaviour, bool includeDisabled = false) where T : class;
     }
 }

@@ -1,344 +1,48 @@
-English | \[中文](README.md)
+[中文](README.md) | English
 
+# Mouse Interaction System
 
+A deterministic Unity 2022.3+ mouse interaction package for hover, click, drag, and drop between 3D Colliders and uGUI Graphics. One `InteractableObject` owns an Odin-serialized polymorphic Behaviour list, so effects remain reusable without adding many MonoBehaviour components. Odin Inspector 3.x is required; the new Input System is optional.
 
-\# Interaction System
+## Usage
 
-A unified system for handling interaction events on \*\*3D objects\*\* and \*\*UI elements\*\*, supporting three core interaction types: Focus, Click, and Drag.
+Add one `InteractionSystem` to the scene. Add `InteractableObject` to a 3D or UI target, then add serializable classes derived from `InteractionBehaviour` to its Odin list. A `↗ TypeName` button on each element opens that Behaviour's script.
 
+Assign `Interaction Camera` explicitly, or call `SetInteractionCamera`. A missing camera reports an error; it is never resolved through Main Camera. For UI-only scenes, set `Max Distance` to 0 and provide an EventSystem and GraphicRaycaster. Selected gizmos show the camera's center ray range and the sphere cast radius at its endpoint.
 
+- `IHoverHandler`: Enter → Stay → Exit
+- `IClickHandler`: Down → Held → Up → Click; an outside release does not click
+- `IDragHandler`: DragBegin → Drag → DragEnd/DragCanceled
+- `IDropHandler`: DragEnter → DragOver → Drop → DragExit
 
-\*\*Not fully tested — basic functionality works.\*\*
+Use `InteractionContext.TryGetDraggedBehaviour<T>()` to communicate between a drag source and drop receiver without reflection. Child Colliders and uGUI Graphics resolve to their parent target automatically, while all geometry belonging to the dragged target is ignored during the drag.
 
+The default pointer source uses Unity's built-in Input Manager. Projects using only the new Input System can implement `IPointerInputSource` and pass it to `InteractionSystem.SetInputSource`; the Chinese README contains a complete adapter.
 
+Returning false from `TryGetFrame` cancels capture and hover. Losing the release edge while the button is no longer held cancels capture. Disabling and re-enabling the dispatcher restores its instance registration.
 
-\*\*Recommended to use with Odin Inspector. Setup without it can be tedious.\*\*
+Callbacks may cancel interactions, disable targets, or add/remove behaviours. Cancellation stops further interaction in that frame; only participants that received a start event receive its terminal event. Canceling or disabling the target during PointerUp suppresses Click. Terminal sequences finish cleanup without duplicate cancellation, and detached behaviours receive no further events.
 
+Do not mutate the same host's list during Initialize, Deinitialize, or refresh cleanup: AddBehaviour and RemoveBehaviour return false, and nested RefreshBehaviours calls are ignored. Compose modules outside these lifecycle callbacks and check mutation return values.
 
+Ordinary colliders and graphics block objects behind them by default. Only GraphicRaycaster results participate in UI selection; PhysicsRaycaster results cannot bypass the configured physics layers. Max Physics Hits is the initial capacity: a full buffer triggers a complete query, expansion, and a warning; later frames reuse the expanded buffer. Unity does not guarantee nearest hits for a full NonAlloc buffer ([API reference](https://docs.unity3d.com/ja/2023.2/ScriptReference/Physics.RaycastNonAlloc.html)).
 
-\---
+## Installation
 
-\*\*Note: Odin is included in this repo. Please support the official license if you use it commercially or are able to.\*\*
+Add the repository through Unity Package Manager or reference a local checkout:
 
-
-
-\---
-
-
-
-\## How It Works
-
-
-
-The core idea is to extract interaction logic out of MonoBehaviours into standalone \*\*Behaviour classes\*\* attached to container components.
-
-
-
+```json
+"com.hubrizz.interaction-system": "file:D:/MyLibrary/InteractionSystem"
 ```
 
-InteractionSystem (singleton)
+## v2 migration
 
-&#x20;   ↓ Raycast / EventSystem polling each frame
+The current design restores v1's single-host Odin Behaviour composition, local/category switches, runtime add/remove, and exact-type global switches. It keeps v2's explicit drag/drop roles and reflection-free dispatch. Per-Behaviour InputActions and separate 3D/UI Behaviour bases remain removed. Existing v1 serialized data requires a deliberate migration because the base type and event interfaces changed.
 
-IInteractableTarget (unified interface)
+## Verification
 
-&#x20;   ├── InteractableObject      → 3D container (Physics Raycast)
+The included PlayMode suite verifies hover ordering, pointer capture, balanced drag/drop transitions, collider/UI blocking, physics buffer expansion, input loss, re-enable registration, callback cancellation/removal, and lifecycle reentrancy.
 
-&#x20;   └── InteractableUIElement   → UI container (EventSystem)
+## Sample entry point
 
-&#x20;           ↓ holds multiple
-
-&#x20;   InteractableBehaviourBase
-
-&#x20;       ├── InteractableThreeDBehaviour  → 3D behaviour (with InputSettings)
-
-&#x20;       └── InteractableUIBehaviour      → UI behaviour (EventSystem-driven)
-
-```
-
-
-
-`InteractionSystem` only cares about `IInteractableTarget` — it doesn't matter whether the source is a physics raycast or a UI event. \*\*3D and UI share the same dispatch pipeline.\*\*
-
-
-
-\---
-
-
-
-\## Supported Interactions
-
-
-
-\### Focus
-
-Triggered when the mouse hovers over an object.
-
-
-
-| Interface | Description |
-
-|-----------|-------------|
-
-| `IFocusable` | Plain focus — triggers on mouse enter / stay / exit |
-
-| `IFocusable<T>` | Drag-aware focus — only triggers when a \*\*specific draggable type\*\* hovers over it; provides dragged object data |
-
-
-
-\### Click
-
-Full click lifecycle from mouse down to release.
-
-
-
-| Callback | When |
-
-|----------|------|
-
-| `OnBeginClick` | Mouse button pressed |
-
-| `OnPressing` | Held down each frame |
-
-| `OnClickReleasedInside` | Released while still over the object (valid click) |
-
-| `OnClickReleasedOutside` | Released outside the object |
-
-| `OnMouseOutWhilePressing` | Mouse moves off while held |
-
-| `OnMouseEnterWhilePressing` | Mouse moves back on while held |
-
-
-
-\### Drag
-
-
-
-| Interface | Description |
-
-|-----------|-------------|
-
-| `IDraggable` | Plain drag with no target context |
-
-| `IDraggable<T>` | Targeted drag — provides receiver data when dragged onto a \*\*specific target type\*\* |
-
-
-
-`OnDraggingWithoutTarget(RaycastHit?)` is called every frame while dragging with no valid target, so you can handle movement yourself.
-
-
-
-\---
-
-
-
-\## Generic Interfaces: Communication Between Two Objects
-
-
-
-`IDraggable<T>` and `IFocusable<T>` handle \*\*data passing between two specific interacting objects\*\* — for example, dragging a card onto a slot where each needs to know about the other.
-
-
-
-\- \*\*T can be another Behaviour type\*\* or any Component
-
-\- At startup, the system uses reflection to scan all assemblies and \*\*pre-caches\*\* generic method mappings — zero reflection overhead at runtime
-
-
-
-\---
-
-
-
-\## Key Mechanisms
-
-
-
-\### Global Behaviour Toggle
-
-Each Behaviour type has a global enabled state (`\_behaviourState`). You can enable/disable an entire class of behaviours at once:
-
-
-
-```csharp
-
-InteractionSystem.Instance.DisableBehaviourType(typeof(MyDragBehaviour));
-
-```
-
-Each behaviour also has a local enabled state that belongs to the instance.
-
-
-
-\### 3D Input (InputSettings)
-
-`InteractableThreeDBehaviour` supports multiple `InputAction` bindings, polled each frame.  
-
-`Pressed / Held / Released` maps to click/drag begin, hold, and release — bind any key you want.
-
-
-
-\### UI Input
-
-`InteractableUIElement` implements Unity's EventSystem interfaces (`IPointerEnterHandler`, etc.) and forwards events directly to `InteractionSystem`, going through the same dispatch path as 3D objects.
-
-
-
-\### Raycast Strategy
-
-\- Tries `RaycastNonAlloc` first
-
-\- Falls back to `SphereCastNonAlloc` (configurable radius) if nothing is hit
-
-\- Hits are sorted by distance; the \*\*currently dragged object is skipped\*\*, so the next object becomes the focus target — enabling "drag object and hover over a receiver" scenarios
-
-
-
-\---
-
-
-
-\## Quick Start
-
-
-
-\### Example 1: Clickable 3D Object
-
-
-
-```csharp
-
-// 1. Create a Behaviour
-
-public class MyClickBehaviour : InteractableThreeDBehaviour, IClickable
-
-{
-
-&#x20;   public void OnBeginClick()             => Debug.Log("Pressed");
-
-&#x20;   public void OnPressing()               { }
-
-&#x20;   public void OnClickReleasedInside()    => Debug.Log("Clicked!");
-
-&#x20;   public void OnClickReleasedOutside()   { }
-
-&#x20;   public void OnMouseOutWhilePressing()  { }
-
-&#x20;   public void OnMouseEnterWhilePressing(){ }
-
-}
-
-
-
-// 2. On a MonoBehaviour that inherits InteractableObject,
-
-//    add MyClickBehaviour to the \_interactableBehaviours list in the Inspector
-
-```
-
-
-
-\### Example 2: Drag a Card onto a Slot (Generic Interaction)
-
-
-
-```csharp
-
-// Card: receives callbacks when dragged onto a SlotBehaviour
-
-public class CardDragBehaviour : InteractableThreeDBehaviour, IDraggable<SlotBehaviour>
-
-{
-
-&#x20;   public void OnBeginDrag() => Debug.Log("Drag started");
-
-&#x20;   public void OnDragEnterTarget(SlotBehaviour slot, RaycastHit hit) => Debug.Log($"Hovering slot {slot}");
-
-&#x20;   public void OnDragReleasedOnTarget(SlotBehaviour slot, RaycastHit hit) => Debug.Log("Dropped on slot!");
-
-&#x20;   public void OnDragLeaveTarget(SlotBehaviour slot, RaycastHit hit) { }
-
-&#x20;   public void OnDragStayOnTarget(SlotBehaviour slot, RaycastHit hit) { }
-
-&#x20;   public void OnDraggingWithoutTarget(RaycastHit? hit) { /\* update position \*/ }
-
-&#x20;   public void OnDragReleaseWithoutTarget(RaycastHit? hit) => Debug.Log("Dropped on nothing");
-
-&#x20;   public void OnMouseOutWhileDragging()  { }
-
-&#x20;   public void OnMouseInWhileDragging()   { }
-
-&#x20;   public void OnMouseStayWhileDragging() { }
-
-}
-
-
-
-// Slot: highlights when the card hovers over it
-
-public class SlotBehaviour : InteractableThreeDBehaviour, IFocusable<CardDragBehaviour>
-
-{
-
-&#x20;   public void OnDraggedObjectEnter(CardDragBehaviour card)    => Highlight(true);
-
-&#x20;   public void OnDraggedObjectLeave(CardDragBehaviour card)    => Highlight(false);
-
-&#x20;   public void OnDraggedObjectReleased(CardDragBehaviour card) => AcceptCard(card);
-
-&#x20;   public void OnDraggedObjectStay(CardDragBehaviour card)     { }
-
-&#x20;   public void OnMouseEnterWithoutTarget() { }
-
-&#x20;   public void OnMouseOutWithoutTarget()   { }
-
-&#x20;   public void OnMouseStayWithoutTarget()  { }
-
-}
-
-```
-
-
-
-\### Example 3: UI Button
-
-
-
-```csharp
-
-// UI Behaviours don't need InputSettings — input is driven by EventSystem
-
-public class UIButtonBehaviour : InteractableUIBehaviour, IClickable
-
-{
-
-&#x20;   public void OnBeginClick()          => Debug.Log("UI Pressed");
-
-&#x20;   public void OnClickReleasedInside() => Debug.Log("UI Clicked!");
-
-&#x20;   // ... other interface members
-
-}
-
-// Add InteractableUIElement to a UI GameObject, then attach this Behaviour
-
-```
-
-
-
-\---
-
-
-
-\## Scene Setup
-
-
-
-1\. Add an empty GameObject to the scene and attach `InteractionSystem`
-
-2\. For 3D objects: inherit from `InteractableObject` and add Behaviours in the Inspector
-
-3\. For UI elements: attach `InteractableUIElement` and add Behaviours in the Inspector
-
-4\. Make sure the scene has an `EventSystem` (required for UI support)
-
+Import the Basic sample from Package Manager, then open `Scenes/BasicDragAndDrop.unity` to run the drag-and-drop example. The sample README also keeps the manual setup steps. Its scene and UI are persistent assets and do not depend on a runtime generator.

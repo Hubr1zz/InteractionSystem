@@ -1,949 +1,961 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
-using Sirenix.OdinInspector;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.UI;
 
 namespace InteractionSystem.Runtime
 {
-    public class InteractionSystem : MonoBehaviour
+    /// <summary>
+    /// Central mouse dispatcher for 3D colliders and uGUI Graphics. It owns pointer capture so
+    /// hover, click, drag and drop have identical ordering regardless of how a target was hit.
+    /// </summary>
+    [DefaultExecutionOrder(-100)]
+    [DisallowMultipleComponent]
+    public sealed class InteractionSystem : MonoBehaviour
     {
-        // ─── Fields ───────────────────────────────────────────────────────────────
-        #region Fields
+        [Header("Pointer")]
+        [SerializeField, Range(0, 2)] private int mouseButton;
+        [SerializeField, Min(0f)] private float dragThreshold = 5f;
 
-        [SerializeField] private float dragThreshold         = 5f;
-        [SerializeField] private float rayRadius             = 0.02f;
-        [SerializeField] private bool  triggerLeaveOnRelease  = true;
-        [SerializeField] private bool  triggerStayOnEnterFrame = true;
-        [SerializeField] private int   maxHitNumber          = 10;
-        private bool inUpdate;
-        
-        private static InteractionSystem _instance;
+        [Header("Physics")]
+        [SerializeField] private Camera interactionCamera;
+        [SerializeField] private LayerMask physicsLayers = ~0;
+        [SerializeField, Min(0f)] private float maxDistance = 1000f;
+        [SerializeField, Min(0f)] private float sphereCastRadius;
+        [Tooltip("Initial hit buffer capacity. A full buffer is expanded and reused automatically.")]
+        [SerializeField, Min(InteractionSystemConsts.MinPhysicsHits)] private int maxPhysicsHits = 32;
+        [SerializeField] private QueryTriggerInteraction queryTriggers = QueryTriggerInteraction.UseGlobal;
+        [Tooltip("When enabled, the nearest non-interactable collider prevents selecting targets behind it.")]
+        [SerializeField] private bool nonInteractablePhysicsBlocks = true;
 
-        [SerializeField][ReadOnly]
-        private Context context = new Context();
-        private IInteractableTarget currentInteractableTarget;
-        private IInteractableTarget possibleClickObject;
-        private IInteractableTarget possibleDragObject;
+        [Header("UI")]
+        [SerializeField] private bool queryUI = true;
+        [Tooltip("When enabled, the first raycastable UI Graphic prevents interaction with objects behind it.")]
+        [SerializeField] private bool nonInteractableUIBlocksPhysics = true;
 
-        [ShowInInspector, ReadOnly]
-        private GameObject          newFocusedObject;  // raw GameObject — may or may not have IInteractableTarget
-        private IInteractableTarget newFocusedTarget;  // non-null only when newFocusedObject has IInteractableTarget
+        private static InteractionSystem instance;
+        private readonly List<RaycastResult> uiResults = new(16);
 
-        private Vector3      _mouseDownPosition = Vector3.negativeInfinity;
-        
+        private readonly List<IHoverHandler> activeHoverHandlers = new(4);
+        private readonly List<IDropHandler> activeDropHandlers = new(4);
+        private readonly List<IClickHandler> capturedClickHandlers = new(4);
+        private readonly List<IDragHandler> activeDragHandlers = new(4);
+        private readonly HashSet<Type> disabledBehaviourTypes = new();
+        private RaycastHit[] physicsHits;
+        private EventSystem eventSystem;
+        private PointerEventData pointerEventData;
+        private IPointerInputSource inputSource;
 
-        private RaycastHit   _hitInfo;
-        private RaycastHit[] hitResults;
-        private Ray          ray;
-        private readonly List<RaycastResult> _uiRaycastResults = new List<RaycastResult>();
-        private readonly PointerEventData _pointerEventData = new PointerEventData(EventSystem.current);
-        
-        private bool shouldClearDrag;
-        private bool shouldClearFocus, newFocus;
-        private bool shouldClearClick;
-
-        enum State { None, Stay, Out, InFromNull, SwitchToNew }
-        private State _draggedObjectViewState = State.None;
-        private State _focusedObjectState     = State.None;
-
-        // behaviourType -> global enabled — shared by InteractableBehaviour AND InteractableUIBehaviour
-        [ShowInInspector][TableList, DictionaryDrawerSettings(IsReadOnly = true)]
-        private Dictionary<Type, bool> _behaviourState = new();
-
-        private struct MethodPair : IEquatable<MethodPair>
-        {
-            public Type       targetType;
-            public MethodInfo method;
-            public bool       needsHitInfo;
-
-            public bool Equals(MethodPair other) => targetType == other.targetType && method == other.method;
-            public override bool Equals(object obj) => obj is MethodPair o && Equals(o);
-            //public override int  GetHashCode() => HashCode.Combine(targetType, method);
-            public MethodPair(Type t, MethodInfo m) 
-            { 
-                targetType   = t; 
-                method       = m;
-                needsHitInfo = m.GetParameters().Length == 2;
-            }
-        }
-
-        // Generic dispatch caches
-        private Dictionary<Type, List<MethodPair>> _dragReleasedOnTargetAsDraggedCache  = new();
-        private Dictionary<Type, List<MethodPair>> _dragReleasedOnTargetAsReceiverCache = new();
-        private Dictionary<Type, List<MethodPair>> _dragEnterTargetAsReceiverCache      = new();
-        private Dictionary<Type, List<MethodPair>> _dragEnterTargetAsDraggedCache       = new();
-        private Dictionary<Type, List<MethodPair>> _dragStayOnTargetAsReceiverCache     = new();
-        private Dictionary<Type, List<MethodPair>> _dragStayOnTargetAsDraggedCache      = new();
-        private Dictionary<Type, List<MethodPair>> _dragLeaveTargetAsReceiverCache      = new();
-        private Dictionary<Type, List<MethodPair>> _dragLeaveTargetAsDraggedCache       = new();
-
-        static readonly Type behaviourBaseDefinition = typeof(InteractableBehaviourBase);
-        static readonly Type draggableGenericDef     = typeof(IDraggable<>);
-        static readonly Type focusableGenericDef     = typeof(IFocusable<>);
-
-        #endregion
-
-        // ─── Properties ───────────────────────────────────────────────────────────
-        #region Properties
+        private PointerFrame pointer;
+        private PointerHit hoverHit;
+        private InteractableObject pressedTarget;
+        private InteractableObject draggedTarget;
+        private InteractableObject dropTarget;
+        private Vector2 pressPosition;
+        private bool isDragging;
+        private bool isCanceling;
+        private bool captureTransition;
+        private bool cancelRequested;
+        private bool warnedHitCapacity;
+        private bool warnedMissingCamera;
+        private int interactionVersion;
 
         public static InteractionSystem Instance
         {
             get
             {
-                if (_instance == null)
-                    _instance = FindObjectOfType<InteractionSystem>();
-                return _instance;
-            }
-        }
-        
-        public float RayRadius => rayRadius;
-        public bool  InUpdate  { get => inUpdate; set => inUpdate = value; }
-
-        public GameObject CurrentFocusedObject
-        {
-            get => context.currentFocused;
-            set => context.currentFocused = value;
-        }
-        public IInteractableTarget CurrentClickedObject
-        {
-            get => context.currentClicked;
-            set => context.currentClicked = value;
-        }
-        public IInteractableTarget CurrentDraggedObject
-        {
-            get => context.currentDragged;
-            set => context.currentDragged = value;
-        }
-
-        #endregion
-
-        // ─── Init ─────────────────────────────────────────────────────────────────
-        public void Awake()
-        {
-            _instance  = this;
-            hitResults = new RaycastHit[maxHitNumber];
-            RegisterAllBehaviourTypes();
-        }
-
-        // ─── Registration ─────────────────────────────────────────────────────────
-        #region Registration
-
-        private void RegisterAllBehaviourTypes()
-        {
-            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                foreach (var type in assembly.GetTypes())
-                {
-                    if (!type.IsClass || type.IsAbstract) continue;
-                    if (!behaviourBaseDefinition.IsAssignableFrom(type)) continue;
-
-                    _behaviourState.TryAdd(type, true);
-
-                    foreach (var iface in type.GetInterfaces())
-                    {
-                        if (!iface.IsGenericType) continue;
-                        Type def  = iface.GetGenericTypeDefinition();
-                        Type tArg = iface.GetGenericArguments()[0];
-
-                        if (def == draggableGenericDef)
-                        {
-                            RegisterCache(type, tArg, GetConcreteMethod(type, iface, "OnDragReleasedOnTarget"), _dragReleasedOnTargetAsDraggedCache);
-                            RegisterCache(type, tArg, GetConcreteMethod(type, iface, "OnDragEnterTarget"),      _dragEnterTargetAsDraggedCache);
-                            RegisterCache(type, tArg, GetConcreteMethod(type, iface, "OnDragStayOnTarget"),     _dragStayOnTargetAsDraggedCache);
-                            RegisterCache(type, tArg, GetConcreteMethod(type, iface, "OnDragLeaveTarget"),      _dragLeaveTargetAsDraggedCache);
-                        }
-                        else if (def == focusableGenericDef)
-                        {
-                            RegisterCache(type, tArg, GetConcreteMethod(type, iface, "OnDraggedObjectReleased"), _dragReleasedOnTargetAsReceiverCache);
-                            RegisterCache(type, tArg, GetConcreteMethod(type, iface, "OnDraggedObjectEnter"),    _dragEnterTargetAsReceiverCache);
-                            RegisterCache(type, tArg, GetConcreteMethod(type, iface, "OnDraggedObjectStay"),     _dragStayOnTargetAsReceiverCache);
-                            RegisterCache(type, tArg, GetConcreteMethod(type, iface, "OnDraggedObjectLeave"),    _dragLeaveTargetAsReceiverCache);
-                        }
-                    }
-                }
+                if (!instance)
+                    Debug.LogError("[InteractionSystem] No enabled InteractionSystem exists in the active scene.");
+                return instance;
             }
         }
 
-        private MethodInfo GetConcreteMethod(Type concreteType, Type iface, string methodName)
+        public static bool TryGetExistingInstance(out InteractionSystem system)
         {
-            var map = concreteType.GetInterfaceMap(iface);
-            var ifaceMethod = iface.GetMethod(methodName);
-            int idx = Array.IndexOf(map.InterfaceMethods, ifaceMethod);
-            return idx >= 0 ? map.TargetMethods[idx] : null;
-        }
-        
-        private void RegisterCache(Type owner, Type paramType, MethodInfo method,
-            Dictionary<Type, List<MethodPair>> dict)
-        {
-            if (!dict.TryGetValue(owner, out var set) || set == null)
-                dict[owner] = set = new List<MethodPair>();
-            set.Add(new MethodPair(paramType, method));
+            system = instance;
+            return system;
         }
 
-        #endregion
+        public InteractableObject HoveredTarget => IsAvailable(hoverHit.Target) ? hoverHit.Target : null;
+        public InteractableObject PressedTarget => IsAvailable(pressedTarget) ? pressedTarget : null;
+        public InteractableObject DraggedTarget => IsAvailable(draggedTarget) ? draggedTarget : null;
+        public InteractableObject DropTarget => IsAvailable(dropTarget) ? dropTarget : null;
+        public bool IsDragging => isDragging;
 
-        // ─── Update ───────────────────────────────────────────────────────────────
-        public void Update()
+        private void Awake()
         {
-            if (IsPointerOverUIOnly())
+            EnsurePhysicsBuffer();
+            inputSource ??= new BuiltInMouseInputSource();
+        }
+
+        private void OnEnable()
+        {
+            if (instance && instance != this)
             {
-                possibleClickObject = null;
-                possibleDragObject  = null;
-
-                // 和 3D 一样：根据 newFocusedObject 推进 _focusedObjectState
-                if      (CurrentFocusedObject && newFocusedObject != CurrentFocusedObject)
-                    _focusedObjectState = State.SwitchToNew;
-                else if (!CurrentFocusedObject && newFocusedObject != null)
-                    _focusedObjectState = State.InFromNull;
-                else if (newFocusedObject != null)
-                    _focusedObjectState = _focusedObjectState == State.None ? State.InFromNull : State.Stay;
-                else
-                    _focusedObjectState = _focusedObjectState == State.Stay ? State.Out : State.None;
-
-                HandleFocus();
-                if (CurrentDraggedObject is InteractableObject) TickDragNoHit();
-                if (CurrentClickedObject is InteractableObject) TickCurrentClick();
-                DelayedUpdate();
+                Debug.LogError("[InteractionSystem] Only one active instance is allowed.", this);
+                enabled = false;
                 return;
             }
 
-            if (Camera.main == null) return;
+            instance = this;
+        }
 
-            ray = Camera.main.ScreenPointToRay(Input.mousePosition);
-            bool hit = GetRayHits(ray, out RaycastHit info, out IInteractableTarget hitTarget);
+        private void OnValidate()
+        {
+            mouseButton = Mathf.Clamp(mouseButton, 0, 2);
+            dragThreshold = Mathf.Max(0f, dragThreshold);
+            maxDistance = Mathf.Max(0f, maxDistance);
+            sphereCastRadius = Mathf.Max(0f, sphereCastRadius);
+            maxPhysicsHits = Mathf.Max(InteractionSystemConsts.MinPhysicsHits, maxPhysicsHits);
+            if (interactionCamera)
+                warnedMissingCamera = false;
+        }
 
-            if (!hit)
+        private void OnDrawGizmosSelected()
+        {
+            if (!interactionCamera || maxDistance <= 0f)
+                return;
+            var ray = interactionCamera.ViewportPointToRay(new Vector3(0.5f, 0.5f, 0f));
+            Gizmos.color = Color.cyan;
+            Gizmos.DrawRay(ray.origin, ray.direction * maxDistance);
+            if (sphereCastRadius > 0f)
+                Gizmos.DrawWireSphere(ray.GetPoint(maxDistance), sphereCastRadius);
+        }
+
+        private void OnDisable()
+        {
+            CancelAllInteractions();
+            if (instance == this)
+                instance = null;
+        }
+
+        private void OnApplicationFocus(bool hasFocus)
+        {
+            if (!hasFocus)
+                CancelAllInteractions();
+        }
+
+        private void OnApplicationPause(bool paused)
+        {
+            if (paused)
+                CancelAllInteractions();
+        }
+
+        /// <summary>Overrides pointer input, useful for tests, replay, or a project's chosen input package.</summary>
+        public void SetInputSource(IPointerInputSource source)
+        {
+            inputSource = source ?? throw new ArgumentNullException(nameof(source));
+            CancelAllInteractions();
+        }
+
+        public void SetInteractionCamera(Camera camera)
+        {
+            interactionCamera = camera;
+            warnedMissingCamera = false;
+        }
+
+        private void Update()
+        {
+            if (inputSource == null || !inputSource.TryGetFrame(mouseButton, out pointer))
             {
-                _hitInfo            = default;
-                newFocusedTarget    = null;
-                possibleClickObject = null;
-                possibleDragObject  = null;
-                ClearCurrentFocused();
-                HandleFocus();
-                HandleClick();
-                HandleDrag();
+                CancelAllInteractions();
+                return;
             }
-            else
+
+            int version = interactionVersion;
+            ValidateCapturedTargets();
+            if (pressedTarget && !pointer.IsPressed && !pointer.ReleasedThisFrame)
+                CancelCapture();
+
+            if (!CanContinue(version))
+                return;
+            var hit = ResolvePointerHit(pointer.ScreenPosition, isDragging ? draggedTarget : null);
+            TransitionHover(hit);
+            if (!CanContinue(version))
+                return;
+
+            if (pointer.PressedThisFrame)
+                BeginPress(hit);
+            if (!CanContinue(version))
+                return;
+
+            if (pressedTarget && pointer.IsPressed && !pointer.PressedThisFrame)
             {
-                _hitInfo = info;
-                Debug.DrawLine(Camera.main.transform.position, _hitInfo.point, Color.red);
-                if (hitTarget != null)
-                    UpdateInfo(hitTarget);
+                if (!isDragging && HasEnabledHandler(pressedTarget.DragHandlers, InteractionCategories.Drag) && (pointer.ScreenPosition - pressPosition).sqrMagnitude >= dragThreshold * dragThreshold)
+                {
+                    BeginDrag();
+                    if (!CanContinue(version))
+                        return;
+                    hit = ResolvePointerHit(pointer.ScreenPosition, draggedTarget);
+                    TransitionHover(hit);
+                    if (!CanContinue(version))
+                        return;
+                }
+
+                if (isDragging)
+                {
+                    UpdateDropTarget(hit);
+                    if (!CanContinue(version) || !isDragging)
+                        return;
+                    var context = CreateContext(hit);
+                    DispatchDrag(activeDragHandlers, DragPhase.Move, context);
+                }
                 else
                 {
-                    currentInteractableTarget = null;
-                    possibleClickObject       = null;
-                    possibleDragObject        = null;
-                }
-                HandleFocus();
-                HandleClick();
-                HandleDrag();
-            }
-
-            DelayedUpdate();
-        }
-
-        private void DelayedUpdate()
-        {
-            if (shouldClearDrag)
-            {
-                CurrentDraggedObject = null;
-                shouldClearDrag      = false;
-            }
-            if (shouldClearFocus)
-            {
-                CurrentFocusedObject = null;
-                shouldClearFocus     = false;
-            }
-            else if (newFocus)
-            {
-                CurrentFocusedObject = newFocusedObject;
-                newFocus             = false;
-            }
-            if (shouldClearClick)
-            {
-                CurrentClickedObject = null;
-                shouldClearClick     = false;
-            }
-        }
-
-        private void UpdateInfo(IInteractableTarget hitObj)
-        {
-            if (hitObj == currentInteractableTarget) return;
-            currentInteractableTarget = hitObj;
-
-            bool shouldHandleDrag  = CurrentDraggedObject == null && possibleDragObject  != hitObj;
-            bool shouldHandleClick = CurrentClickedObject == null && possibleClickObject != hitObj;
-
-            foreach (var behaviour in hitObj.interactableBehaviours)
-            {
-                if (!IsBehaviourEnabledBase(behaviour, false)) continue;
-                if (shouldHandleDrag  && behaviour is IDraggableBase && behaviour.EnableDragLocal)
-                    possibleDragObject = hitObj;
-                if (shouldHandleClick && behaviour is IClickable && behaviour.EnableClickLocal)
-                    possibleClickObject = hitObj;
-            }
-        }
-
-        private void TickDragNoHit()
-        {
-            if (CurrentDraggedObject == null) return;
-            foreach (var draggableBase in CurrentDraggedObject.draggableBehaviours)
-            {
-                if (draggableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b)) continue;
-                if (HasInput3D(draggableBase, 1))      TickCurrentDrag(draggableBase);
-                else if (HasInput3D(draggableBase, 2)) DragRelease(draggableBase);
-            }
-        }
-
-        // ─── Focus ────────────────────────────────────────────────────────────────
-        #region Focus
-
-        private void HandleFocus()
-        {
-            if (CurrentFocusedObject)
-            {
-                if (newFocusedObject && newFocusedObject != CurrentFocusedObject)
-                {
-                    ClearCurrentFocused(false);
-                    StartNewFocus();
-                }
-                TickCurrentFocus();
-            }
-            else if (newFocusedObject)
-            {
-                StartNewFocus();
-                TickCurrentFocus();
-            }
-            else
-            {
-                ClearCurrentFocused();
-            }
-        }
-
-        private void StartNewFocus()
-        {
-            newFocus = true;
-            if (newFocusedTarget == null) return; // no IInteractableTarget, nothing to dispatch
-
-            foreach (var behaviour in newFocusedTarget.focusableBehaviours)
-            {
-                if (behaviour is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b) || !b.EnableFocusLocal) continue;
-
-                if (behaviour is IFocusable plain)
-                    plain.OnMouseEnterWithoutTarget();
-                else
-                {
-                    if (!TriggerConditionalFocus(behaviour, _dragEnterTargetAsReceiverCache))
-                        behaviour.OnMouseEnterWithoutTarget();
+                    var context = CreateContext(hit);
+                    DispatchClick(capturedClickHandlers, ClickPhase.Held, context);
                 }
             }
+
+            if (pointer.ReleasedThisFrame)
+            {
+                if (!CanContinue(version))
+                    return;
+                if (isDragging)
+                    CompleteDrag(hit);
+                else CompleteClick(hit);
+
+                if (!CanContinue(version))
+                    return;
+                var releasedHit = ResolvePointerHit(pointer.ScreenPosition, null);
+                TransitionHover(releasedHit);
+            }
         }
 
-        private void TickCurrentFocus()
+        private void BeginPress(PointerHit hit)
         {
-            if (!CurrentFocusedObject) return;
-            // Only dispatch if the focused object has an IInteractableTarget
-            if (CurrentFocusedObject.TryGetComponent<InteractableObject>(out var io3d))
+            if (pressedTarget || isDragging)
+                CancelCapture();
+
+            if (!IsAvailable(hit.Target))
+                return;
+            if (!HasEnabledHandler(hit.Target.ClickHandlers, InteractionCategories.Click) && !HasEnabledHandler(hit.Target.DragHandlers, InteractionCategories.Drag))
+                return;
+
+            pressedTarget = hit.Target;
+            pressPosition = pointer.ScreenPosition;
+            CollectEnabled(pressedTarget.ClickHandlers, capturedClickHandlers, InteractionCategories.Click);
+            var context = CreateContext(hit);
+            DispatchClick(capturedClickHandlers, ClickPhase.Down, context);
+            if (!IsAvailable(pressedTarget))
+                CancelCapture();
+        }
+
+        private void CompleteClick(PointerHit hit)
+        {
+            if (!IsAvailable(pressedTarget))
             {
-                DispatchFocusTick(io3d);
+                CancelCapture();
+                return;
             }
-            else if (CurrentFocusedObject.TryGetComponent<InteractableUIElement>(out var uie))
+
+            var captured = pressedTarget;
+            bool releasedInside = hit.Target == captured;
+            var context = CreateContext(hit);
+            captureTransition = true;
+            try
             {
-                DispatchFocusTick(uie);
+                DispatchClick(capturedClickHandlers, ClickPhase.Up, context, releasedInside, true);
+                if (releasedInside && !cancelRequested && IsAvailable(captured) && isActiveAndEnabled)
+                    DispatchClick(capturedClickHandlers, ClickPhase.Click, context);
+            }
+            finally
+            {
+                capturedClickHandlers.Clear();
+                pressedTarget = null;
+                FinishCaptureTransition();
             }
         }
 
-        private void DispatchFocusTick(IInteractableTarget target)
+        private void BeginDrag()
         {
-            foreach (var behaviour in target.focusableBehaviours)
-            {
-                if (behaviour is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b) || !b.EnableFocusLocal) continue;
+            if (!IsAvailable(pressedTarget))
+                return;
+            draggedTarget = pressedTarget;
+            isDragging = true;
 
-                if (behaviour is IFocusable plain)
-                    plain.OnMouseStayWithoutTarget();
-                else
+            var context = CreateContext(hoverHit);
+            captureTransition = true;
+            try
+            {
+                DispatchClick(capturedClickHandlers, ClickPhase.Cancel, context, false, true);
+                capturedClickHandlers.Clear();
+                if (!cancelRequested && IsAvailable(draggedTarget) && isActiveAndEnabled)
                 {
-                    if (_focusedObjectState == State.Stay ||
-                        (_focusedObjectState == State.InFromNull && triggerStayOnEnterFrame))
-                        TriggerConditionalFocus(behaviour, _dragStayOnTargetAsReceiverCache);
+                    CollectEnabled(draggedTarget.DragHandlers, activeDragHandlers, InteractionCategories.Drag);
+                    DispatchDrag(activeDragHandlers, DragPhase.Begin, context);
                 }
             }
+            finally
+            {
+                FinishCaptureTransition();
+            }
+
+            if (isDragging && (!IsAvailable(draggedTarget) || !HasEnabledHandler(activeDragHandlers, InteractionCategories.Drag)))
+                CancelCapture();
         }
 
-        private void ClearCurrentFocused(bool setToNull = true)
+        private void CompleteDrag(PointerHit hit)
         {
-            if (!CurrentFocusedObject) return;
-
-            // Only dispatch if the focused object has an IInteractableTarget
-            IInteractableTarget target = CurrentFocusedObject.GetComponent<InteractableObject>() as IInteractableTarget
-                                      ?? CurrentFocusedObject.GetComponent<InteractableUIElement>();
-            if (target != null)
+            UpdateDropTarget(hit);
+            if (!isDragging)
+                return;
+            var context = CreateContext(hit);
+            captureTransition = true;
+            try
             {
-                foreach (var focusableBase in target.focusableBehaviours)
+                if (IsAvailable(dropTarget))
+                    DispatchDrop(activeDropHandlers, DropPhase.Drop, context);
+
+                if (draggedTarget)
+                    DispatchDrag(activeDragHandlers, DragPhase.End, context, true);
+
+                ExitDropTarget(context, true);
+            }
+            finally
+            {
+                isDragging = false;
+                activeDragHandlers.Clear();
+                capturedClickHandlers.Clear();
+                draggedTarget = null;
+                pressedTarget = null;
+                FinishCaptureTransition();
+            }
+        }
+
+        private void CancelCapture()
+        {
+            if (captureTransition)
+            {
+                cancelRequested = true;
+                return;
+            }
+            interactionVersion++;
+            captureTransition = true;
+            var context = CreateContext(hoverHit);
+            try
+            {
+                if (isDragging && draggedTarget)
+                    DispatchDrag(activeDragHandlers, DragPhase.Cancel, context, true);
+                else if (pressedTarget)
+                    DispatchClick(capturedClickHandlers, ClickPhase.Cancel, context, false, true);
+
+                ExitDropTarget(context, true);
+            }
+            finally
+            {
+                isDragging = false;
+                activeDragHandlers.Clear();
+                capturedClickHandlers.Clear();
+                draggedTarget = null;
+                pressedTarget = null;
+                FinishCaptureTransition();
+            }
+        }
+
+        private void FinishCaptureTransition()
+        {
+            captureTransition = false;
+            if (!cancelRequested)
+                return;
+            cancelRequested = false;
+            CancelAllInteractions();
+        }
+
+        private bool CanContinue(int version) => version == interactionVersion && isActiveAndEnabled && !cancelRequested;
+
+        private void TransitionHover(PointerHit nextHit)
+        {
+            int version = interactionVersion;
+            var previous = hoverHit.Target;
+            var next = IsAvailable(nextHit.Target) ? nextHit.Target : null;
+
+            if (previous == next)
+            {
+                hoverHit = nextHit;
+                if (next)
                 {
-                    if (focusableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b)) continue;
-                    if (focusableBase is IFocusable plain)
-                        plain.OnMouseOutWithoutTarget();
-                    else
+                    var stayContext = CreateContext(nextHit);
+                    ReconcileHoverHandlers(next, stayContext);
+                    if (!CanContinue(version))
+                        return;
+                    DispatchHover(activeHoverHandlers, HoverPhase.Stay, stayContext);
+                }
+                return;
+            }
+
+            var exitHandlers = ListPool<IHoverHandler>.Get();
+            try
+            {
+                var exitContext = CreateContext(hoverHit);
+                exitHandlers.AddRange(activeHoverHandlers);
+                activeHoverHandlers.Clear();
+                hoverHit = PointerHit.None;
+                DispatchHover(exitHandlers, HoverPhase.Exit, exitContext, true);
+            }
+            finally
+            {
+                ListPool<IHoverHandler>.Release(exitHandlers);
+            }
+
+            if (!CanContinue(version))
+                return;
+            hoverHit = nextHit;
+            if (IsAvailable(next))
+            {
+                CollectEnabled(next.HoverHandlers, activeHoverHandlers, InteractionCategories.Hover);
+                var enterContext = CreateContext(nextHit);
+                DispatchHover(activeHoverHandlers, HoverPhase.Enter, enterContext);
+            }
+        }
+
+        private void ReconcileHoverHandlers(InteractableObject target, in InteractionContext context)
+        {
+            int version = interactionVersion;
+            for (int i = activeHoverHandlers.Count - 1; i >= 0; i--)
+            {
+                var handler = activeHoverHandlers[i];
+                if (IsHandlerEnabled(handler, InteractionCategories.Hover))
+                    continue;
+
+                activeHoverHandlers.RemoveAt(i);
+                DispatchHoverSingle(handler, HoverPhase.Exit, context, true);
+                if (!CanContinue(version))
+                    return;
+            }
+
+            var handlers = target.HoverHandlers;
+            for (int i = 0; i < handlers.Count; i++)
+            {
+                var handler = handlers[i];
+                if (!IsHandlerEnabled(handler, InteractionCategories.Hover) || activeHoverHandlers.Contains(handler))
+                    continue;
+
+                activeHoverHandlers.Add(handler);
+                DispatchHoverSingle(handler, HoverPhase.Enter, context);
+                if (!CanContinue(version))
+                    return;
+            }
+        }
+
+        private void UpdateDropTarget(PointerHit hit)
+        {
+            if (!isDragging)
+                return;
+            int version = interactionVersion;
+            var candidate = IsAvailable(hit.Target) && hit.Target != draggedTarget ? hit.Target : null;
+            var acceptedHandlers = ListPool<IDropHandler>.Get();
+            var candidates = ListPool<IDropHandler>.Get();
+            try
+            {
+                if (candidate)
+                {
+                    var probeContext = CreateContext(hit, candidate);
+                    CollectEnabled(candidate.DropHandlers, candidates, InteractionCategories.Drop);
+                    foreach (var handler in candidates)
                     {
-                        bool leaveTriggered = false;
-                        if (triggerLeaveOnRelease)
-                            leaveTriggered = TriggerConditionalFocus(focusableBase, _dragLeaveTargetAsReceiverCache);
-                        if (!leaveTriggered)
-                            focusableBase.OnMouseOutWithoutTarget();
+                        if (!IsHandlerEnabled(handler, InteractionCategories.Drop))
+                            continue;
+                        bool accepted = CanAcceptDrop(handler, probeContext);
+                        if (!CanContinue(version) || !isDragging || !IsAvailable(candidate))
+                            return;
+                        if (accepted && CanDispatch(handler, InteractionCategories.Drop, false, candidate))
+                            acceptedHandlers.Add(handler);
                     }
                 }
-            }
-            shouldClearFocus = setToNull;
-        }
 
-        #endregion
-
-        // ─── Click ────────────────────────────────────────────────────────────────
-        #region Click
-
-        private void HandleClick()
-        {
-            if (CurrentClickedObject != null) { TickCurrentClick(); return; }
-            if (possibleClickObject  != null) StartNewClicked(possibleClickObject);
-            TickCurrentClick();
-        }
-
-        private void TickCurrentClick()
-        {
-            if (CurrentClickedObject == null) return;
-            foreach (var clickable in CurrentClickedObject.clickableBehaviours)
-            {
-                if (clickable is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b)) continue;
-                if (HasInput3D(clickable, 1))
+                if (candidate != dropTarget || !SameHandlers(activeDropHandlers, acceptedHandlers))
                 {
-                    clickable.OnPressing();
-                    switch (_focusedObjectState)
+                    ExitDropTarget(CreateContext(hit), true);
+                    if (!CanContinue(version) || !isDragging)
+                        return;
+                    if (acceptedHandlers.Count > 0)
                     {
-                        case State.Out:
-                            if (CurrentFocusedObject != CurrentClickedObject.gameObject)
-                                clickable.OnMouseOutWhilePressing();
-                            break;
-                        case State.InFromNull:
-                            if (newFocusedObject == CurrentClickedObject.gameObject)
-                                clickable.OnMouseEnterWhilePressing();
-                            break;
-                        case State.Stay:
-                        case State.None:
-                            break;
-                        case State.SwitchToNew:
-                            if (newFocusedObject == CurrentClickedObject.gameObject)
-                                clickable.OnMouseEnterWhilePressing();
-                            else if (CurrentFocusedObject != CurrentClickedObject.gameObject)
-                                clickable.OnMouseOutWhilePressing();
-                            break;
+                        dropTarget = candidate;
+                        activeDropHandlers.AddRange(acceptedHandlers);
+                        var enterContext = CreateContext(hit);
+                        DispatchDrop(activeDropHandlers, DropPhase.Enter, enterContext);
+                        if (!CanContinue(version) || !isDragging)
+                            return;
                     }
                 }
-                if (HasInput3D(clickable, 2))
+
+                if (dropTarget)
                 {
-                    if (CurrentFocusedObject && CurrentFocusedObject == CurrentClickedObject.gameObject)
-                        clickable.OnClickReleasedInside();
-                    else
-                        clickable.OnClickReleasedOutside();
-                    CurrentClickedObject = null;
+                    var overContext = CreateContext(hit);
+                    DispatchDrop(activeDropHandlers, DropPhase.Over, overContext);
                 }
+            }
+            finally
+            {
+                ListPool<IDropHandler>.Release(acceptedHandlers);
+                ListPool<IDropHandler>.Release(candidates);
             }
         }
 
-        private void StartNewClicked(IInteractableTarget obj)
+        private void ExitDropTarget(InteractionContext context, bool includeDisabled = false)
         {
-            if (obj == null) return;
-            bool ended = false;
-            foreach (var clickable in obj.clickableBehaviours)
+            var handlers = ListPool<IDropHandler>.Get();
+            try
             {
-                if (clickable is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b)) continue;
-                if (HasInput3D(clickable, 0))
-                {
-                    if (!ended) { ClearCurrentClicked(); ended = true; CurrentClickedObject = obj; }
-                    clickable.OnBeginClick();
-                }
+                handlers.AddRange(activeDropHandlers);
+                activeDropHandlers.Clear();
+                dropTarget = null;
+                DispatchDrop(handlers, DropPhase.Exit, context, includeDisabled);
+            }
+            finally
+            {
+                ListPool<IDropHandler>.Release(handlers);
             }
         }
 
-        public void ClearCurrentClicked()
+        private PointerHit ResolvePointerHit(Vector2 screenPosition, InteractableObject ignoredTarget)
         {
-            if (CurrentClickedObject == null) return;
-            foreach (var clickable in CurrentClickedObject.clickableBehaviours)
-                clickable.OnClickReleasedOutside();
-            shouldClearClick = true;
+            bool hasUIHit = TryResolveUI(screenPosition, ignoredTarget, out var uiHit, out bool blocksPhysics);
+            if (blocksPhysics)
+                return PointerHit.None;
+            if (hasUIHit && uiHit.IsScreenSpaceUI)
+                return uiHit;
+
+            var physicsHit = ResolvePhysics(screenPosition, ignoredTarget);
+            if (!hasUIHit)
+                return physicsHit;
+            if (!physicsHit.HasWorldHit || uiHit.Distance <= physicsHit.Distance)
+                return uiHit;
+            return physicsHit;
         }
 
-        #endregion
-
-        // ─── Drag ─────────────────────────────────────────────────────────────────
-        #region Drag
-
-        private bool IsCurrentDraggedObj(GameObject go)
+        private bool TryResolveUI(Vector2 screenPosition, InteractableObject ignoredTarget,
+            out PointerHit hit, out bool blocksPhysics)
         {
-            if (CurrentDraggedObject == null || !go) return false;
-            // Compare by gameObject reference
-            return (CurrentDraggedObject as MonoBehaviour)?.gameObject == go;
-        }
+            hit = PointerHit.None;
+            blocksPhysics = false;
+            if (!queryUI || EventSystem.current == null)
+                return false;
 
-        private void HandleDrag()
-        {
-            if (CurrentDraggedObject != null)
+            if (eventSystem != EventSystem.current || pointerEventData == null)
             {
-                foreach (var draggableBase in CurrentDraggedObject.draggableBehaviours)
-                {
-                    if (draggableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b) || !b.EnableDragLocal) continue;
-                    if (HasInput3D(draggableBase, 1))      TickCurrentDrag(draggableBase);
-                    else if (HasInput3D(draggableBase, 2)) DragRelease(draggableBase);
-                }
+                eventSystem = EventSystem.current;
+                pointerEventData = new PointerEventData(eventSystem);
             }
-            if (possibleDragObject != null) TryStartNewDrag();
-        }
 
-        public void ClearCurrentDragged()
-        {
-            if (CurrentDraggedObject == null || shouldClearDrag) return;
-            foreach (var draggableBase in CurrentDraggedObject.draggableBehaviours)
-                DragRelease(draggableBase);
-            shouldClearDrag = true;
-        }
+            pointerEventData.Reset();
+            pointerEventData.position = screenPosition;
+            uiResults.Clear();
+            eventSystem.RaycastAll(pointerEventData, uiResults);
 
-        private void TryStartNewDrag()
-        {
-            bool mouseDown = false, clearPrevious = false;
-            foreach (var draggableBase in possibleDragObject.draggableBehaviours)
+            foreach (var result in uiResults)
             {
-                if (draggableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b) || !b.EnableDragLocal) continue;
-                if (HasInput3D(draggableBase, 0) && !mouseDown)
+                if (!result.gameObject || result.module is not GraphicRaycaster)
+                    continue;
+                var target = result.gameObject.GetComponentInParent<InteractableObject>();
+                if (ignoredTarget && target == ignoredTarget)
+                    continue;
+                var canvas = result.module ? result.module.GetComponent<Canvas>() : null;
+                bool isScreenSpace = !canvas || canvas.renderMode != RenderMode.WorldSpace;
+                if (IsAvailable(target))
                 {
-                    mouseDown = true;
-                    _mouseDownPosition = Input.mousePosition;
+                    hit = PointerHit.ForUI(target, result.gameObject, result.distance, isScreenSpace);
+                    return true;
                 }
-                else if (HasInput3D(draggableBase, 1))
+
+                if (nonInteractableUIBlocksPhysics)
                 {
-                    if (Vector3.SqrMagnitude(_mouseDownPosition - Input.mousePosition) <=
-                        dragThreshold * dragThreshold) continue;
-                    if (!clearPrevious)
+                    if (isScreenSpace)
                     {
-                        ClearCurrentDragged();
-                        clearPrevious        = true;
-                        CurrentDraggedObject = possibleDragObject;
+                        blocksPhysics = true;
+                        return false;
                     }
-                    draggableBase.OnBeginDrag();
+
+                    hit = PointerHit.ForUI(null, result.gameObject, result.distance, false);
+                    return true;
                 }
             }
+
+            return false;
         }
 
-        private void TickCurrentDrag(IDraggableBase draggableBase)
+        private PointerHit ResolvePhysics(Vector2 screenPosition, InteractableObject ignoredTarget)
         {
-            switch (_draggedObjectViewState)
+            if (maxDistance <= 0f)
+                return PointerHit.None;
+            if (!interactionCamera)
             {
-                case State.InFromNull: draggableBase.OnMouseInWhileDragging();   break;
-                case State.Out:        draggableBase.OnMouseOutWhileDragging();  break;
-                case State.Stay:       draggableBase.OnMouseStayWhileDragging(); break;
-            }
-
-            if (draggableBase is IDraggable)
-            {
-                draggableBase.OnDraggingWithoutTarget(_hitInfo);
-            }
-            else
-            {
-                switch (_focusedObjectState)
+                if (!warnedMissingCamera)
                 {
-                    case State.InFromNull:
-                        TriggerConditionalDrag(draggableBase, newFocusedObject, _dragEnterTargetAsDraggedCache);
-                        break;
-                    case State.Out:
-                        TriggerConditionalDrag(draggableBase, CurrentFocusedObject, _dragLeaveTargetAsDraggedCache);
-                        break;
-                    case State.SwitchToNew:
-                        TriggerConditionalDrag(draggableBase, newFocusedObject,     _dragEnterTargetAsDraggedCache);
-                        TriggerConditionalDrag(draggableBase, CurrentFocusedObject, _dragLeaveTargetAsDraggedCache);
-                        break;
-                    case State.Stay:
-                        if (!TriggerConditionalDrag(draggableBase, CurrentFocusedObject, _dragStayOnTargetAsDraggedCache))
-                            draggableBase.OnDraggingWithoutTarget(_hitInfo);
-                        break;
-                    case State.None:
-                        draggableBase.OnDraggingWithoutTarget(_hitInfo);
-                        break;
+                    warnedMissingCamera = true;
+                    Debug.LogError("[InteractionSystem] Assign Interaction Camera to enable physics interaction, or set Max Distance to 0 for UI-only scenes.", this);
+                }
+                return PointerHit.None;
+            }
+            EnsurePhysicsBuffer();
+
+            var ray = interactionCamera.ScreenPointToRay(screenPosition);
+            int count = Physics.RaycastNonAlloc(ray, physicsHits, maxDistance, physicsLayers, queryTriggers);
+            bool useSphere = count == 0 && sphereCastRadius > 0f;
+            if (useSphere)
+                count = Physics.SphereCastNonAlloc(ray, sphereCastRadius, physicsHits, maxDistance, physicsLayers, queryTriggers);
+
+            // NonAlloc queries do not guarantee the nearest hits when the buffer fills.
+            // Grow from a complete query once, then reuse the larger buffer on subsequent frames.
+            if (count == physicsHits.Length)
+            {
+                var allHits = useSphere ? Physics.SphereCastAll(ray, sphereCastRadius, maxDistance, physicsLayers, queryTriggers) : Physics.RaycastAll(ray, maxDistance, physicsLayers, queryTriggers);
+                physicsHits = new RaycastHit[Mathf.Max(physicsHits.Length * 2, allHits.Length + 1)];
+                Array.Copy(allHits, physicsHits, allHits.Length);
+                count = allHits.Length;
+                if (!warnedHitCapacity)
+                {
+                    warnedHitCapacity = true;
+                    Debug.LogWarning("[InteractionSystem] Physics hit buffer was full and has been expanded. Increase Max Physics Hits to avoid the initial allocation.", this);
                 }
             }
+
+            float closestSurfaceDistance = float.PositiveInfinity;
+            float closestTargetDistance = float.PositiveInfinity;
+            PointerHit closestSurface = PointerHit.None;
+            PointerHit closestTarget = PointerHit.None;
+            for (int i = 0; i < count; i++)
+            {
+                var physicsHit = physicsHits[i];
+                if (!physicsHit.collider)
+                    continue;
+                var target = physicsHit.collider.GetComponentInParent<InteractableObject>();
+                if (ignoredTarget && target == ignoredTarget)
+                    continue;
+
+                if (physicsHit.distance < closestSurfaceDistance)
+                {
+                    closestSurfaceDistance = physicsHit.distance;
+                    closestSurface = PointerHit.ForPhysics(IsAvailable(target) ? target : null, physicsHit);
+                }
+
+                if (IsAvailable(target) && physicsHit.distance < closestTargetDistance)
+                {
+                    closestTargetDistance = physicsHit.distance;
+                    closestTarget = PointerHit.ForPhysics(target, physicsHit);
+                }
+            }
+
+            return nonInteractablePhysicsBlocks ? closestSurface :
+                (closestTarget.Target ? closestTarget : closestSurface);
         }
 
-        private void DragRelease(IDraggableBase draggableBase)
+        private void ValidateCapturedTargets()
         {
-            _mouseDownPosition = Vector3.negativeInfinity;
-            if (draggableBase is IDraggable)
+            if ((pressedTarget && !IsAvailable(pressedTarget)) || (draggedTarget && !IsAvailable(draggedTarget)))
+                CancelCapture();
+            else if (isDragging && !HasEnabledHandler(activeDragHandlers, InteractionCategories.Drag))
+                CancelCapture();
+            if (hoverHit.Target && !IsAvailable(hoverHit.Target))
+                TransitionHover(PointerHit.None);
+            if (dropTarget && !IsAvailable(dropTarget))
+                ExitDropTarget(CreateContext(hoverHit), true);
+        }
+
+        internal void NotifyTargetUnavailable(InteractableObject target)
+        {
+            if (!target || isCanceling)
+                return;
+            interactionVersion++;
+            if (captureTransition)
             {
-                draggableBase.OnDragReleaseWithoutTarget(_hitInfo);
+                if (target == pressedTarget || target == draggedTarget || target == dropTarget || target == hoverHit.Target)
+                    cancelRequested = true;
+                return;
             }
+            if (target == pressedTarget || target == draggedTarget)
+                CancelCapture();
+            if (target == dropTarget)
+                ExitDropTarget(CreateContext(hoverHit), true);
+            if (target == hoverHit.Target)
+                TransitionHover(PointerHit.None);
+        }
+
+        public void CancelAllInteractions()
+        {
+            interactionVersion++;
+            if (captureTransition)
+            {
+                cancelRequested = true;
+                return;
+            }
+            if (isCanceling)
+                return;
+            isCanceling = true;
+            try
+            {
+                CancelCapture();
+                TransitionHover(PointerHit.None);
+            }
+            finally
+            {
+                isCanceling = false;
+            }
+        }
+
+        private InteractionContext CreateContext(PointerHit hit, InteractableObject dropOverride = null)
+        {
+            return new InteractionContext(this, pointer, hit, pressedTarget, draggedTarget,
+                dropOverride ? dropOverride : dropTarget);
+        }
+
+        private void EnsurePhysicsBuffer()
+        {
+            int capacity = Mathf.Max(InteractionSystemConsts.MinPhysicsHits, maxPhysicsHits);
+            if (physicsHits == null || physicsHits.Length < capacity)
+            {
+                physicsHits = new RaycastHit[capacity];
+                warnedHitCapacity = false;
+            }
+        }
+
+        private static bool IsAvailable(InteractableObject target) => target && target.InteractionEnabled;
+
+        public void SetBehaviourTypeEnabled<T>(bool enabled) where T : InteractionBehaviour => SetBehaviourTypeEnabled(typeof(T), enabled);
+
+        public void SetBehaviourTypeEnabled(Type behaviourType, bool enabled)
+        {
+            if (behaviourType == null)
+                throw new ArgumentNullException(nameof(behaviourType));
+            if (!typeof(InteractionBehaviour).IsAssignableFrom(behaviourType))
+                throw new ArgumentException($"{behaviourType.FullName} does not derive from {nameof(InteractionBehaviour)}.", nameof(behaviourType));
+
+            if (enabled)
+                disabledBehaviourTypes.Remove(behaviourType);
             else
+                disabledBehaviourTypes.Add(behaviourType);
+        }
+
+        public bool IsBehaviourTypeEnabled(Type behaviourType) => behaviourType != null && !disabledBehaviourTypes.Contains(behaviourType);
+
+        public void EnableBehaviourType(Type behaviourType) => SetBehaviourTypeEnabled(behaviourType, true);
+
+        public void DisableBehaviourType(Type behaviourType) => SetBehaviourTypeEnabled(behaviourType, false);
+
+        private bool HasEnabledHandler<T>(IReadOnlyList<T> handlers, InteractionCategories category) where T : class
+        {
+            for (int i = 0; i < handlers.Count; i++)
+                if (IsHandlerEnabled(handlers[i], category))
+                    return true;
+            return false;
+        }
+
+        private void CollectEnabled<T>(IReadOnlyList<T> source, List<T> destination, InteractionCategories category) where T : class
+        {
+            destination.Clear();
+            for (int i = 0; i < source.Count; i++)
+                if (IsHandlerEnabled(source[i], category))
+                    destination.Add(source[i]);
+        }
+
+        private static bool SameHandlers(List<IDropHandler> left, List<IDropHandler> right)
+        {
+            if (left.Count != right.Count)
+                return false;
+            for (int i = 0; i < left.Count; i++)
+                if (!ReferenceEquals(left[i], right[i]))
+                    return false;
+            return true;
+        }
+
+        private enum HoverPhase { Enter, Stay, Exit }
+        private enum ClickPhase { Down, Held, Up, Click, Cancel }
+        private enum DragPhase { Begin, Move, End, Cancel }
+        private enum DropPhase { Enter, Over, Drop, Exit }
+
+        private bool IsHandlerEnabled(object handler, InteractionCategories category)
+        {
+            return InteractableObject.IsHandlerEnabled(handler, category) && !disabledBehaviourTypes.Contains(handler.GetType());
+        }
+
+        private bool CanDispatch(object handler, InteractionCategories category, bool includeDisabled, InteractableObject expectedTarget)
+        {
+            if (!InteractableObject.IsHandlerAlive(handler) || ((InteractionBehaviour)handler).Target != expectedTarget)
+                return false;
+            return includeDisabled || (isActiveAndEnabled && !cancelRequested && IsAvailable(((InteractionBehaviour)handler).Target) && IsHandlerEnabled(handler, category));
+        }
+
+        private void DispatchHover(IReadOnlyList<IHoverHandler> handlers, HoverPhase phase,
+            in InteractionContext context, bool includeDisabled = false)
+        {
+            int version = interactionVersion;
+            var snapshot = ListPool<IHoverHandler>.Get(handlers);
+            if (phase == HoverPhase.Enter)
+                activeHoverHandlers.Clear();
+            try
             {
-                if (!TriggerConditionalDrag(draggableBase, CurrentFocusedObject, _dragReleasedOnTargetAsDraggedCache))
-                    draggableBase.OnDragReleaseWithoutTarget(_hitInfo);
-                TriggerResponsiveFocus(draggableBase, _dragReleasedOnTargetAsReceiverCache);
+                foreach (var handler in snapshot)
+                {
+                    if (!includeDisabled && !CanContinue(version))
+                        return;
+                    if (!CanDispatch(handler, InteractionCategories.Hover, includeDisabled, context.HoveredTarget))
+                        continue;
+                    if (phase == HoverPhase.Enter)
+                        activeHoverHandlers.Add(handler);
+                    DispatchHoverSingle(handler, phase, context, includeDisabled);
+                }
             }
-            shouldClearDrag = true;
-        }
-
-        #endregion
-
-        // ─── UI EventSystem Bridge ────────────────────────────────────────────────
-        #region UI Bridge
-        
-        public void OnUIPointerEnter(InteractableUIElement element)
-        {
-            newFocusedObject = element.gameObject;
-            newFocusedTarget = element;
-        }
-
-        public void OnUIPointerExit(InteractableUIElement element)
-        {
-            newFocusedObject = null;
-            newFocusedTarget = null;
-        }
-
-        public void OnUIPointerDown(InteractableUIElement element)
-        {
-            if (CurrentClickedObject != null) ClearCurrentClicked();
-            foreach (var clickable in element.clickableBehaviours)
+            finally
             {
-                if (clickable is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b) || !b.EnableClickLocal) continue;
-                CurrentClickedObject = element;
-                clickable.OnBeginClick();
+                ListPool<IHoverHandler>.Release(snapshot);
             }
-            DelayedUpdate();
         }
 
-        public void OnUIPointerUp(InteractableUIElement element)
+        private void DispatchHoverSingle(IHoverHandler handler, HoverPhase phase, in InteractionContext context, bool includeDisabled = false)
         {
-            if (CurrentClickedObject != element) return;
-            foreach (var clickable in element.clickableBehaviours)
+            if (!CanDispatch(handler, InteractionCategories.Hover, includeDisabled, context.HoveredTarget))
+                return;
+            try
             {
-                if (clickable is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b)) continue;
-                if (CurrentFocusedObject == element.gameObject) clickable.OnClickReleasedInside();
-                else                                             clickable.OnClickReleasedOutside();
+                switch (phase)
+                {
+                    case HoverPhase.Enter: handler.OnHoverEnter(context); break;
+                    case HoverPhase.Stay: handler.OnHoverStay(context); break;
+                    case HoverPhase.Exit: handler.OnHoverExit(context); break;
+                }
             }
-            shouldClearClick = true;
-            DelayedUpdate();
+            catch (Exception exception) { LogHandlerException(exception, handler); }
         }
 
-        public void OnUIBeginDrag(InteractableUIElement element)
+        private void DispatchClick(IReadOnlyList<IClickHandler> handlers, ClickPhase phase, in InteractionContext context, bool releasedInside = false, bool includeDisabled = false)
         {
-            ClearCurrentDragged();
-            CurrentDraggedObject    = element;
-            _draggedObjectViewState = State.InFromNull;
-            foreach (var draggableBase in element.draggableBehaviours)
+            int version = interactionVersion;
+            var snapshot = ListPool<IClickHandler>.Get(handlers);
+            if (phase == ClickPhase.Down)
+                capturedClickHandlers.Clear();
+            try
             {
-                if (draggableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b) || !b.EnableDragLocal) continue;
-                draggableBase.OnBeginDrag();
+                foreach (var handler in snapshot)
+                {
+                    if (!includeDisabled && !CanContinue(version))
+                        return;
+                    if (!CanDispatch(handler, InteractionCategories.Click, includeDisabled, context.PressedTarget))
+                        continue;
+                    if (phase == ClickPhase.Down)
+                        capturedClickHandlers.Add(handler);
+                    try
+                    {
+                        switch (phase)
+                        {
+                            case ClickPhase.Down: handler.OnPointerDown(context); break;
+                            case ClickPhase.Held: handler.OnPointerHeld(context); break;
+                            case ClickPhase.Up: handler.OnPointerUp(context, releasedInside); break;
+                            case ClickPhase.Click: handler.OnClick(context); break;
+                            case ClickPhase.Cancel: handler.OnPointerCanceled(context); break;
+                        }
+                    }
+                    catch (Exception exception) { LogHandlerException(exception, handler); }
+                }
             }
-            DelayedUpdate();
-        }
-
-        public void OnUIDrag(InteractableUIElement element)
-        {
-            if (CurrentDraggedObject != element) return;
-            foreach (var draggableBase in element.draggableBehaviours)
+            finally
             {
-                if (draggableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b) || !b.EnableDragLocal) continue;
-                TickCurrentDrag(draggableBase);
+                ListPool<IClickHandler>.Release(snapshot);
             }
-            TickCurrentFocus();
-            DelayedUpdate();
         }
 
-        public void OnUIEndDrag(InteractableUIElement element)
+        private void DispatchDrag(IReadOnlyList<IDragHandler> handlers, DragPhase phase, in InteractionContext context, bool includeDisabled = false)
         {
-            if (CurrentDraggedObject != element) return;
-            foreach (var draggableBase in element.draggableBehaviours)
+            int version = interactionVersion;
+            var snapshot = ListPool<IDragHandler>.Get(handlers);
+            if (phase == DragPhase.Begin)
+                activeDragHandlers.Clear();
+            try
             {
-                if (draggableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b) || !b.EnableDragLocal) continue;
-                DragRelease(draggableBase);
+                foreach (var handler in snapshot)
+                {
+                    if (!includeDisabled && !CanContinue(version))
+                        return;
+                    if (!CanDispatch(handler, InteractionCategories.Drag, includeDisabled, context.DraggedTarget))
+                        continue;
+                    if (phase == DragPhase.Begin)
+                        activeDragHandlers.Add(handler);
+                    try
+                    {
+                        switch (phase)
+                        {
+                            case DragPhase.Begin: handler.OnDragBegin(context); break;
+                            case DragPhase.Move: handler.OnDrag(context); break;
+                            case DragPhase.End: handler.OnDragEnd(context); break;
+                            case DragPhase.Cancel: handler.OnDragCanceled(context); break;
+                        }
+                    }
+                    catch (Exception exception) { LogHandlerException(exception, handler); }
+                }
             }
-            DelayedUpdate();
+            finally
+            {
+                ListPool<IDragHandler>.Release(snapshot);
+            }
         }
 
-        #endregion
-
-        // ─── Helpers ──────────────────────────────────────────────────────────────
-        #region Helpers
-
-        /// <summary>Unified enabled check — works for any InteractableBehaviourBase subclass.</summary>
-        private bool IsBehaviourEnabledBase(InteractableBehaviourBase b, bool log = true)
+        private void DispatchDrop(IReadOnlyList<IDropHandler> handlers, DropPhase phase, in InteractionContext context, bool includeDisabled = false)
         {
-            if (!b.BehaviourEnabledLocal)
+            int version = interactionVersion;
+            var snapshot = ListPool<IDropHandler>.Get(handlers);
+            if (phase == DropPhase.Enter)
+                activeDropHandlers.Clear();
+            try
             {
-                if (log) Debug.LogWarning(b.GetType() + " disabled on " + b.Owner?.name);
+                foreach (var handler in snapshot)
+                {
+                    if (!includeDisabled && !CanContinue(version))
+                        return;
+                    if (!CanDispatch(handler, InteractionCategories.Drop, includeDisabled, context.DropTarget))
+                        continue;
+                    if (phase == DropPhase.Enter)
+                        activeDropHandlers.Add(handler);
+                    try
+                    {
+                        switch (phase)
+                        {
+                            case DropPhase.Enter: handler.OnDragEnter(context); break;
+                            case DropPhase.Over: handler.OnDragOver(context); break;
+                            case DropPhase.Drop: handler.OnDrop(context); break;
+                            case DropPhase.Exit: handler.OnDragExit(context); break;
+                        }
+                    }
+                    catch (Exception exception) { LogHandlerException(exception, handler); }
+                }
+            }
+            finally
+            {
+                ListPool<IDropHandler>.Release(snapshot);
+            }
+        }
+
+        private static bool CanAcceptDrop(IDropHandler handler, in InteractionContext context)
+        {
+            try { return handler.CanAcceptDrop(context); }
+            catch (Exception exception)
+            {
+                LogHandlerException(exception, handler);
                 return false;
             }
+        }
 
-            if (_behaviourState.TryGetValue(b.GetType(), out bool globalEnabled))
+        private static void LogHandlerException(Exception exception, object owner)
+        {
+            Debug.LogException(exception, (owner as InteractionBehaviour)?.Target);
+        }
+
+        private static class ListPool<T>
+        {
+            private static readonly Stack<List<T>> pool = new();
+            public static List<T> Get() => pool.Count > 0 ? pool.Pop() : new List<T>(4);
+            public static List<T> Get(IReadOnlyList<T> source)
             {
-                if (!globalEnabled && log) Debug.LogWarning(b.GetType() + " disabled globally");
-                return globalEnabled;
+                var list = Get();
+                for (int i = 0; i < source.Count; i++)
+                    list.Add(source[i]);
+                return list;
             }
-
-            if (log) Debug.LogWarning($"[EasyInteractive] {b.GetType()} on {b.Owner?.name} not registered.");
-            return false;
-        }
-
-        /// <summary>Input polling — only meaningful for 3D behaviours; returns false for UI.</summary>
-        private bool HasInput3D(object behaviour, int type)
-        {
-            if (behaviour is not InteractableThreeDBehaviour b3d) return false;
-            return HasInput(b3d.InputSettings, type);
-        }
-
-        private bool HasInput(List<InteractableThreeDBehaviour.InputSetting> settings, int type)
-        {
-            foreach (var t in settings)
-                switch (type)
-                {
-                    case 0: if (t.IsTriggered(InteractableThreeDBehaviour.InputSetting.TriggerType.Pressed))  return true; break;
-                    case 1: if (t.IsTriggered(InteractableThreeDBehaviour.InputSetting.TriggerType.Held))     return true; break;
-                    case 2: if (t.IsTriggered(InteractableThreeDBehaviour.InputSetting.TriggerType.Released)) return true; break;
-                }
-            return false;
-        }
-
-        // ─── Generic dispatch ─────────────────────────────────────────────────────
-
-        private bool TriggerResponsiveFocus(IDraggableBase draggableBase,
-            Dictionary<Type, List<MethodPair>> cache)
-        {
-            if (!CurrentFocusedObject) return false;
-            IInteractableTarget focusedTarget = CurrentFocusedObject.GetComponent<InteractableObject>() as IInteractableTarget
-                                             ?? CurrentFocusedObject.GetComponent<InteractableUIElement>();
-            if (focusedTarget == null) return false;
-
-            bool triggered = false;
-            foreach (var focusableBase in focusedTarget.focusableBehaviours)
+            public static void Release(List<T> list)
             {
-                if (focusableBase is not InteractableBehaviourBase b || focusableBase is IFocusable || !IsBehaviourEnabledBase(b)) continue;
-
-                if (!cache.TryGetValue(b.GetType(), out var set)) continue;
-
-                foreach (var pair in set)
-                {
-                    if (!pair.targetType.IsInstanceOfType(draggableBase)) continue;
-                    pair.method.Invoke(focusableBase, new object[] { draggableBase });
-                    triggered = true;
-                }
-            }
-            return triggered;
-        }
-
-        private bool TriggerConditionalFocus(IFocusableBase focusableBase,
-            Dictionary<Type, List<MethodPair>> cache)
-        {
-            if (CurrentDraggedObject == null || focusableBase is IFocusable) return false;
-            if (focusableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b)) return false;
-
-            return TryInvokeGeneric(b.GetType(), focusableBase, CurrentDraggedObject.gameObject, cache);
-        }
-
-        private bool TriggerConditionalDrag(IDraggableBase draggableBase,
-            GameObject focusedObject, Dictionary<Type, List<MethodPair>> cache)
-        {
-            if (!focusedObject || draggableBase is IDraggable) return false;
-            if (draggableBase is not InteractableBehaviourBase b || !IsBehaviourEnabledBase(b)) return false;
-
-            return TryInvokeGeneric(b.GetType(), draggableBase, focusedObject, cache);
-        }
-
-        /// <summary>
-        /// Core generic invocation.
-        /// Searches both InteractableObject and InteractableUIElement on targetObj for matching T.
-        /// </summary>
-        private bool TryInvokeGeneric(Type behaviourType, object behaviour, GameObject targetObj,
-            Dictionary<Type, List<MethodPair>> cache)
-        {
-            if (!targetObj) return false;
-            if (!cache.TryGetValue(behaviourType, out var set)) return false;
-
-            bool found = false;
-            foreach (var pair in set)
-            {
-                if (typeof(InteractableBehaviourBase).IsAssignableFrom(pair.targetType))
-                {
-                    // Search all behaviours from any IInteractableTarget on the object
-                    var target = targetObj.GetComponent<InteractableObject>() as IInteractableTarget
-                              ?? targetObj.GetComponent<InteractableUIElement>();
-                    if (target == null) continue;
-
-                    foreach (var m in target.interactableBehaviours.Where(b => pair.targetType.IsInstanceOfType(b)))
-                    {
-                        pair.method.Invoke(behaviour, pair.needsHitInfo
-                            ? new object[] { m, _hitInfo }
-                            : new object[] { m });
-                        found = true;
-                    }
-                }
-                else if (typeof(Component).IsAssignableFrom(pair.targetType))
-                {
-                    var component = targetObj.GetComponent(pair.targetType);
-                    if (component == null) continue;
-                    pair.method.Invoke(behaviour, pair.needsHitInfo
-                        ? new object[] { component, _hitInfo }
-                        : new object[] { component });
-                    found = true;
-                }
-                else
-                {
-                    Debug.LogWarning("Unsupported target type: " + pair.targetType);
-                }
-            }
-            return found;
-        }
-
-        #endregion
-
-        // ─── Raycast ──────────────────────────────────────────────────────────────
-        #region Raycast
-
-        private bool IsPointerOverUIOnly()
-        {
-            _pointerEventData.position = Input.mousePosition;
-            _uiRaycastResults.Clear();
-            EventSystem.current.RaycastAll(_pointerEventData, _uiRaycastResults);
-
-            for (int i = 0; i < _uiRaycastResults.Count; i++)
-            {
-                var go = _uiRaycastResults[i].gameObject;
-                if (!go.GetComponent<RectTransform>()) continue;
-
-                var canvas = _uiRaycastResults[i].module?.transform.GetComponentInParent<Canvas>();
-                if (!canvas) continue;
-
-                if (canvas.renderMode != RenderMode.WorldSpace) return true;
-
-                // World Space: only block if InteractableUIElement is present
-                if (go.GetComponentInParent<InteractableUIElement>()) return true;
-            }
-            return false;
-        }
-        
-        private bool GetRayHits(Ray ray, out RaycastHit closestHit, out IInteractableTarget hitObj)
-        {
-            closestHit       = default;
-            hitObj           = null;
-            newFocusedObject = null;
-            newFocusedTarget = null;
-
-            int hitNum = Physics.RaycastNonAlloc(ray, hitResults);
-            if (hitNum == 0)
-                hitNum = Physics.SphereCastNonAlloc(ray, rayRadius, hitResults);
-
-            return handle(hitNum, out closestHit, out hitObj);
-
-            bool handle(int number, out RaycastHit ch, out IInteractableTarget focusTarget)
-            {
-                ch = default; focusTarget = null;
-                if (number == 0)
-                {
-                    outState(ref _draggedObjectViewState);
-                    outState(ref _focusedObjectState);
-                    return false;
-                }
-
-                Array.Sort(hitResults, 0, number,
-                    Comparer<RaycastHit>.Create((a, b) => a.distance.CompareTo(b.distance)));
-
-                bool draggedIsFirst = IsCurrentDraggedObj(hitResults[0].transform.gameObject);
-                if (draggedIsFirst) inState(ref _draggedObjectViewState);
-                else                outState(ref _draggedObjectViewState);
-
-                int idx = draggedIsFirst ? 1 : 0;
-                if (idx >= number)
-                {
-                    newFocusedObject = null;
-                    newFocusedTarget = null;
-                    outState(ref _focusedObjectState);
-                    return false;
-                }
-
-                ch = hitResults[idx];
-                var go = ch.transform.gameObject;
-                // Always set newFocusedObject — supports plain GameObjects too
-                newFocusedObject = go;
-                // Only set newFocusedTarget if it implements IInteractableTarget
-                focusTarget = go.GetComponent<InteractableObject>() as IInteractableTarget ?? go.GetComponent<InteractableUIElement>();
-                newFocusedTarget = focusTarget;
-
-                // State comparison uses CurrentFocusedObject (GameObject) — consistent with plain object support
-                if      (CurrentFocusedObject && newFocusedObject != CurrentFocusedObject)
-                    _focusedObjectState = State.SwitchToNew;
-                else if (!CurrentFocusedObject)
-                    _focusedObjectState = State.InFromNull;
-                else
-                    inState(ref _focusedObjectState);
-
-                return true;
-            }
-
-            void outState(ref State s) => s = s == State.Stay ? State.Out : State.None;
-            void inState(ref State s)  => s = s == State.None ? State.InFromNull : State.Stay;
-        }
-
-        #endregion
-
-        // ─── Public API ───────────────────────────────────────────────────────────
-
-        public void Reset()
-        {
-            _hitInfo            = default;
-            newFocusedObject    = null;
-            newFocusedTarget    = null;
-            possibleClickObject = null;
-            possibleDragObject  = null;
-            ClearCurrentClicked();
-            ClearCurrentDragged();
-            ClearCurrentFocused();
-        }
-
-        public void EnableBehaviourType(Type type)
-        {
-            if (_behaviourState.ContainsKey(type)) _behaviourState[type] = true;
-            else Debug.LogWarning(type + " not registered.");
-        }
-
-        public void DisableBehaviourType(Type type)
-        {
-            if (_behaviourState.ContainsKey(type)) _behaviourState[type] = false;
-            else Debug.LogWarning(type + " not registered.");
-        }
-
-        public void OnDrawGizmos()
-        {
-            if (!Application.isPlaying) return;
-            Gizmos.color = Color.red;
-            Vector3 end = ray.origin + ray.direction * 999;
-            Gizmos.DrawLine(ray.origin, end);
-            Gizmos.color = Color.green;
-            Gizmos.DrawWireSphere(ray.origin, rayRadius);
-            Gizmos.DrawWireSphere(end,        rayRadius);
-            for (int i = 0; i < 8; i++)
-            {
-                float   a   = i * 45f * Mathf.Deg2Rad;
-                Vector3 off = new Vector3(Mathf.Cos(a), Mathf.Sin(a), 0) * rayRadius;
-                Gizmos.DrawLine(ray.origin + off, end + off);
+                list.Clear();
+                pool.Push(list);
             }
         }
-    }
-
-    [Serializable]
-    public class Context
-    {
-        [ShowInInspector, ReadOnly]
-        public IInteractableTarget currentDragged = null;
-        [ShowInInspector, ReadOnly]
-        public IInteractableTarget currentClicked = null;
-        public GameObject          currentFocused = null;
     }
 }

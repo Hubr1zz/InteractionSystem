@@ -1,16 +1,19 @@
-Shader "InteractionSystem/Samples/Portable Unlit Color"
+Shader "InteractionSystem/Samples/Portable Transparent Unlit Color"
 {
     Properties
     {
-        _Color("Color", Color) = (1, 1, 1, 1)
+        _Color("Color", Color) = (1, 1, 1, 0.45)
     }
 
     SubShader
     {
-        Tags { "RenderType" = "Opaque" "Queue" = "Geometry" }
+        Tags { "RenderType" = "Transparent" "Queue" = "Transparent" }
 
         Pass
         {
+            Blend SrcAlpha OneMinusSrcAlpha
+            ZWrite Off
+
             CGPROGRAM
             #pragma vertex vert
             #pragma fragment frag

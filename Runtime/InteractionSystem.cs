@@ -549,6 +549,9 @@ namespace InteractionSystem.Runtime
             {
                 if (!result.gameObject || result.module is not GraphicRaycaster)
                     continue;
+                var alphaFilter = result.gameObject.GetComponent<UIAlphaRaycastFilter>();
+                if (alphaFilter && alphaFilter.isActiveAndEnabled && !alphaFilter.AllowsRaycast(screenPosition, result.module.eventCamera))
+                    continue;
                 var target = result.gameObject.GetComponentInParent<InteractableObject>();
                 if (ignoredTarget && target == ignoredTarget)
                     continue;

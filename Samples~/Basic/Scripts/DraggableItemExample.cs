@@ -9,6 +9,8 @@ namespace InteractionSystem.Samples
         [SerializeField] private Renderer targetRenderer;
         [Tooltip("Use _BaseColor for URP Lit or _Color for the Built-in Standard shader.")]
         [SerializeField] private string colorProperty = "_BaseColor";
+        [Tooltip("Transparent material used only while dragging. The normal scene material remains opaque and depth-sorted.")]
+        [SerializeField] private Material dragFeedbackMaterial;
         [SerializeField] private Color hoverColor = Color.cyan;
         [SerializeField] private float surfaceOffset = 0.1f;
         [Tooltip("Colour used while dragging over a location that cannot accept the item.")]
@@ -17,6 +19,7 @@ namespace InteractionSystem.Samples
         [SerializeField] private Color validDragColor = new Color(0f, 1f, 0f, 0.45f);
 
         private MaterialPropertyBlock properties;
+        private Material originalMaterial;
         private Color originalColor;
         private int colorPropertyId;
         private Vector3 dragStart;
@@ -34,12 +37,15 @@ namespace InteractionSystem.Samples
                 throw new System.InvalidOperationException("Assign Target Renderer on DraggableItemExample.");
             if (string.IsNullOrWhiteSpace(colorProperty) || !targetRenderer.sharedMaterial || !targetRenderer.sharedMaterial.HasProperty(colorProperty))
                 throw new System.InvalidOperationException("Assign a material and a valid Color Property on DraggableItemExample.");
+            if (!dragFeedbackMaterial || !dragFeedbackMaterial.HasProperty(colorProperty))
+                throw new System.InvalidOperationException("Assign a transparent Drag Feedback Material with the configured Color Property on DraggableItemExample.");
 
             colorPropertyId = Shader.PropertyToID(colorProperty);
             properties ??= new MaterialPropertyBlock();
-            originalColor = targetRenderer.sharedMaterial.GetColor(colorPropertyId);
             if (!initialTransformCaptured)
             {
+                originalMaterial = targetRenderer.sharedMaterial;
+                originalColor = originalMaterial.GetColor(colorPropertyId);
                 initialParent = Transform.parent;
                 initialLocalPosition = Transform.localPosition;
                 initialLocalRotation = Transform.localRotation;
@@ -48,6 +54,13 @@ namespace InteractionSystem.Samples
                 placed = false;
             }
             dragging = false;
+            RestoreOriginalAppearance();
+        }
+
+        public override void Deinitialize()
+        {
+            dragging = false;
+            RestoreOriginalAppearance();
         }
 
         public void OnHoverEnter(in InteractionContext context)
@@ -83,6 +96,7 @@ namespace InteractionSystem.Samples
         {
             dragStart = Transform.position;
             dragging = true;
+            targetRenderer.sharedMaterial = dragFeedbackMaterial;
             SetColor(invalidDragColor);
         }
 
@@ -101,14 +115,14 @@ namespace InteractionSystem.Samples
             else
                 Transform.position = dragStart;
             dragging = false;
-            SetColor(originalColor);
+            RestoreOriginalAppearance();
         }
 
         public void OnDragCanceled(in InteractionContext context)
         {
             Transform.position = dragStart;
             dragging = false;
-            SetColor(originalColor);
+            RestoreOriginalAppearance();
         }
 
         private void RestoreInitialTransform()
@@ -125,6 +139,14 @@ namespace InteractionSystem.Samples
             targetRenderer.GetPropertyBlock(properties);
             properties.SetColor(colorPropertyId, color);
             targetRenderer.SetPropertyBlock(properties);
+        }
+
+        private void RestoreOriginalAppearance()
+        {
+            if (!targetRenderer || !originalMaterial)
+                return;
+            targetRenderer.sharedMaterial = originalMaterial;
+            SetColor(originalColor);
         }
     }
 }

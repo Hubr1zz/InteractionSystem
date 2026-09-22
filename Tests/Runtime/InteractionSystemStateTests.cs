@@ -11,6 +11,7 @@ namespace InteractionSystem.Runtime.Tests
     public sealed class InteractionSystemStateTests
     {
         private readonly List<GameObject> objects = new();
+        private readonly List<Object> resources = new();
         private InteractionSystem system;
         private Camera camera;
         private FakePointer pointer;
@@ -38,6 +39,10 @@ namespace InteractionSystem.Runtime.Tests
                 if (objects[i])
                     Object.Destroy(objects[i]);
             objects.Clear();
+            for (int i = resources.Count - 1; i >= 0; i--)
+                if (resources[i])
+                    Object.Destroy(resources[i]);
+            resources.Clear();
             yield return null;
         }
 
@@ -195,6 +200,92 @@ namespace InteractionSystem.Runtime.Tests
             yield return Frame(new Vector2(-1000f, -1000f), false, false, false);
 
             CollectionAssert.AreEqual(new[] { "hover-enter", "hover-exit" }, recorder.Events);
+        }
+
+        [UnityTest]
+        public IEnumerator ImageAlphaFilter_SkipsTransparentPixelsAndCanBeDisabled()
+        {
+            Create("Event System").AddComponent<EventSystem>();
+            var canvasObject = Create("Canvas");
+            canvasObject.AddComponent<Canvas>().renderMode = RenderMode.ScreenSpaceOverlay;
+            canvasObject.AddComponent<GraphicRaycaster>();
+
+            var texture = new Texture2D(8, 1, TextureFormat.RGBA32, false) { filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Clamp };
+            texture.SetPixels(new[]
+            {
+                new Color(1f, 1f, 1f, 0f), new Color(1f, 1f, 1f, 0f), new Color(1f, 1f, 1f, 0f), new Color(1f, 1f, 1f, 0f),
+                Color.white, Color.white, Color.white, Color.white
+            });
+            texture.Apply();
+            resources.Add(texture);
+            var sprite = Sprite.Create(texture, new Rect(0f, 0f, 8f, 1f), new Vector2(0.5f, 0.5f), 1f, 0, SpriteMeshType.FullRect);
+            resources.Add(sprite);
+
+            var uiObject = Create("Alpha Target");
+            uiObject.transform.SetParent(canvasObject.transform, false);
+            var rect = uiObject.AddComponent<RectTransform>();
+            rect.sizeDelta = new Vector2(200f, 100f);
+            var image = uiObject.AddComponent<Image>();
+            image.sprite = sprite;
+            var filter = uiObject.AddComponent<UIAlphaRaycastFilter>();
+            filter.TargetGraphic = image;
+            filter.AlphaAffectsRaycast = true;
+            filter.MinimumAlpha = 0.1f;
+            var target = uiObject.AddComponent<InteractableObject>();
+            var recorder = new Recorder();
+            target.AddBehaviour(recorder);
+            Canvas.ForceUpdateCanvases();
+            yield return null;
+
+            Vector2 transparentPoint = RectTransformUtility.WorldToScreenPoint(null, rect.TransformPoint(new Vector3(-75f, 0f)));
+            Vector2 opaquePoint = RectTransformUtility.WorldToScreenPoint(null, rect.TransformPoint(new Vector3(75f, 0f)));
+            Assert.IsFalse(filter.AllowsRaycast(transparentPoint, null));
+            Assert.IsTrue(filter.AllowsRaycast(opaquePoint, null));
+            var physicsTarget = CreateTarget("Target Behind Transparent Pixel", camera.ScreenPointToRay(transparentPoint).GetPoint(5f), out _);
+            yield return Frame(transparentPoint, false, false, false);
+            Assert.AreSame(physicsTarget, system.HoveredTarget);
+            yield return Frame(opaquePoint, false, false, false);
+            Assert.AreSame(target, system.HoveredTarget);
+
+            yield return Frame(new Vector2(-1000f, -1000f), false, false, false);
+            filter.AlphaAffectsRaycast = false;
+            yield return Frame(transparentPoint, false, false, false);
+            Assert.AreSame(target, system.HoveredTarget);
+        }
+
+        [UnityTest]
+        public IEnumerator TextAlphaFilter_UsesGeneratedGlyphGeometryInsteadOfTheFullRect()
+        {
+            Create("Event System").AddComponent<EventSystem>();
+            var canvasObject = Create("Canvas");
+            canvasObject.AddComponent<Canvas>().renderMode = RenderMode.ScreenSpaceOverlay;
+            canvasObject.AddComponent<GraphicRaycaster>();
+
+            var uiObject = Create("Text Target");
+            uiObject.transform.SetParent(canvasObject.transform, false);
+            var rect = uiObject.AddComponent<RectTransform>();
+            rect.sizeDelta = new Vector2(300f, 100f);
+            var text = uiObject.AddComponent<Text>();
+            text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            text.fontSize = 64;
+            text.alignment = TextAnchor.MiddleCenter;
+            text.text = "X";
+            var filter = uiObject.AddComponent<UIAlphaRaycastFilter>();
+            filter.TargetGraphic = text;
+            filter.AlphaAffectsRaycast = true;
+            filter.MinimumAlpha = 0.1f;
+            var target = uiObject.AddComponent<InteractableObject>();
+            var recorder = new Recorder();
+            target.AddBehaviour(recorder);
+            Canvas.ForceUpdateCanvases();
+            yield return null;
+
+            Vector2 emptyPoint = RectTransformUtility.WorldToScreenPoint(null, rect.TransformPoint(new Vector3(-120f, 0f)));
+            Vector2 glyphPoint = RectTransformUtility.WorldToScreenPoint(null, rect.TransformPoint(Vector3.zero));
+            yield return Frame(emptyPoint, false, false, false);
+            Assert.IsNull(system.HoveredTarget);
+            yield return Frame(glyphPoint, false, false, false);
+            Assert.AreSame(target, system.HoveredTarget);
         }
 
         [UnityTest]

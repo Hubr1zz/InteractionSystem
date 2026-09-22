@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Restored opaque depth rendering for stationary sample objects and limited the transparent material to the actively dragged item.
+- Added per-Graphic `UIAlphaRaycastFilter` settings for transparent Image/RawImage pixels and Text glyph-area hit testing.
 - Added placed-item reset on click, initial-transform restoration, and semi-transparent red/green drag feedback for invalid and valid drop locations in the Basic sample.
 - Added saved UI click and UI drop examples to the Basic sample, including the EventSystem, Canvas wiring, and visible orange drop landing marker.
 - Fixed ordinary collider/UI blockers being skipped and excluded physics raycasters from UI selection.

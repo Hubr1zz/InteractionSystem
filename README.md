@@ -145,6 +145,8 @@ public sealed class InputSystemMouseSource : IPointerInputSource
 - 拖拽时会跳过拖拽源的全部子 Collider/UI Graphic，不会自遮挡。
 - 屏幕空间 UI 默认优先于物理对象；世界空间 UI 按射线距离与 Collider 比较。
 - 非交互 UI 默认阻挡位于其后方的交互对象。
+- 可在单个 UI Graphic 上添加 `UIAlphaRaycastFilter`，显式赋值同物体上的 Graphic 并启用 `Alpha Affects Raycast`。开启后，Image/RawImage 按生成网格和纹理 Alpha 过滤命中，Text 按实际生成的字形网格过滤空白区域；关闭时保持默认矩形命中。
+- Image/RawImage 启用 Alpha 命中时，其 Texture Import Settings 必须开启 Read/Write；无法读取的纹理会输出错误并拒绝命中，避免透明区域继续静默遮挡后方目标。
 - 非交互 Collider 默认阻挡后方交互对象，避免穿墙点击。
 - 可通过 LayerMask、最大距离、Trigger 策略和命中缓冲区控制物理查询。
 - `Max Physics Hits` 是初始缓冲容量。容量满时获取完整结果并扩容，输出一次警告；之后复用扩容结果，避免漏掉最近物体。原因见 [Unity RaycastNonAlloc 文档](https://docs.unity3d.com/ja/2023.2/ScriptReference/Physics.RaycastNonAlloc.html)。
@@ -175,6 +177,7 @@ public sealed class InputSystemMouseSource : IPointerInputSource
 - uGUI Graphic 使用同一套 Hover 状态机
 - 多物体 Drag/Drop 的 Enter、Over、Drop、Exit 平衡顺序
 - 普通 Collider / Graphic 遮挡、PhysicsRaycaster 隔离与满缓冲区最近目标选择
+- 单个 UI Graphic 的可选 Alpha 命中，包括透明图片穿透、文字矩形空白穿透和关闭过滤后的兼容行为
 - 系统重新启用、输入中断、丢失释放边沿时的清理
 - 回调中取消、禁用、移除 Behaviour，及生命周期刷新重入
 

@@ -183,10 +183,10 @@ MonoBehaviour:
     - Name: contentRoot
       Entry: 10
       Data: 0
-    - Name: 
+    - Name:
       Entry: 8
-      Data: 
-    - Name: 
+      Data:
+    - Name:
       Entry: 13
       Data: 
     - Name: 
@@ -826,6 +826,7 @@ MonoBehaviour:
     SerializedBytes: 
     ReferencedUnityObjects:
     - {fileID: 945017388}
+    - {fileID: 2100000, guid: 8d4c6f291d6c47d7834038299d86ba50, type: 2}
     SerializedBytesString: 
     Prefab: {fileID: 0}
     PrefabModificationsReferencedUnityObjects: []
@@ -853,6 +854,9 @@ MonoBehaviour:
     - Name: colorProperty
       Entry: 1
       Data: _Color
+    - Name: dragFeedbackMaterial
+      Entry: 10
+      Data: 1
     - Name: hoverColor
       Entry: 7
       Data: UnityEngine.Color, UnityEngine.CoreModule
@@ -1442,6 +1446,7 @@ MonoBehaviour:
     SerializedBytes: 
     ReferencedUnityObjects:
     - {fileID: 1852466487}
+    - {fileID: 2100000, guid: 8d4c6f291d6c47d7834038299d86ba50, type: 2}
     SerializedBytesString: 
     Prefab: {fileID: 0}
     PrefabModificationsReferencedUnityObjects: []
@@ -1469,6 +1474,9 @@ MonoBehaviour:
     - Name: colorProperty
       Entry: 1
       Data: _Color
+    - Name: dragFeedbackMaterial
+      Entry: 10
+      Data: 1
     - Name: hoverColor
       Entry: 7
       Data: UnityEngine.Color, UnityEngine.CoreModule
@@ -1505,6 +1513,9 @@ MonoBehaviour:
     - Name:
       Entry: 4
       Data: 0.45
+    - Name:
+      Entry: 8
+      Data:
     - Name: validDragColor
       Entry: 7
       Data: UnityEngine.Color, UnityEngine.CoreModule
@@ -1520,15 +1531,18 @@ MonoBehaviour:
     - Name:
       Entry: 4
       Data: 0.45
-    - Name: 
+    - Name:
       Entry: 8
-      Data: 
-    - Name: 
+      Data:
+    - Name:
+      Entry: 8
+      Data:
+    - Name:
       Entry: 13
-      Data: 
-    - Name: 
+      Data:
+    - Name:
       Entry: 8
-      Data: 
+      Data:
 --- !u!23 &1852466487
 MeshRenderer:
   m_ObjectHideFlags: 0

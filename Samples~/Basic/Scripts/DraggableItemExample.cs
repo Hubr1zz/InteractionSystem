@@ -11,11 +11,22 @@ namespace InteractionSystem.Samples
         [SerializeField] private string colorProperty = "_BaseColor";
         [SerializeField] private Color hoverColor = Color.cyan;
         [SerializeField] private float surfaceOffset = 0.1f;
+        [Tooltip("Colour used while dragging over a location that cannot accept the item.")]
+        [SerializeField] private Color invalidDragColor = new Color(1f, 0f, 0f, 0.45f);
+        [Tooltip("Colour used while dragging over a valid drop target.")]
+        [SerializeField] private Color validDragColor = new Color(0f, 1f, 0f, 0.45f);
 
         private MaterialPropertyBlock properties;
         private Color originalColor;
         private int colorPropertyId;
         private Vector3 dragStart;
+        private Transform initialParent;
+        private Vector3 initialLocalPosition;
+        private Quaternion initialLocalRotation;
+        private Vector3 initialLocalScale;
+        private bool initialTransformCaptured;
+        private bool dragging;
+        private bool placed;
 
         public override void Initialize()
         {
@@ -27,33 +38,87 @@ namespace InteractionSystem.Samples
             colorPropertyId = Shader.PropertyToID(colorProperty);
             properties ??= new MaterialPropertyBlock();
             originalColor = targetRenderer.sharedMaterial.GetColor(colorPropertyId);
+            if (!initialTransformCaptured)
+            {
+                initialParent = Transform.parent;
+                initialLocalPosition = Transform.localPosition;
+                initialLocalRotation = Transform.localRotation;
+                initialLocalScale = Transform.localScale;
+                initialTransformCaptured = true;
+                placed = false;
+            }
+            dragging = false;
         }
 
-        public void OnHoverEnter(in InteractionContext context) => SetColor(hoverColor);
+        public void OnHoverEnter(in InteractionContext context)
+        {
+            if (dragging)
+                return;
+            SetColor(hoverColor);
+        }
+
         public void OnHoverStay(in InteractionContext context) { }
-        public void OnHoverExit(in InteractionContext context) => SetColor(originalColor);
+
+        public void OnHoverExit(in InteractionContext context)
+        {
+            if (dragging)
+                return;
+            SetColor(originalColor);
+        }
 
         public void OnPointerDown(in InteractionContext context) { }
         public void OnPointerHeld(in InteractionContext context) { }
         public void OnPointerUp(in InteractionContext context, bool releasedInside) { }
-        public void OnClick(in InteractionContext context) => Debug.Log($"Clicked {Owner.name}", Owner);
+
+        public void OnClick(in InteractionContext context)
+        {
+            if (placed)
+                RestoreInitialTransform();
+            Debug.Log($"Clicked {Owner.name}", Owner);
+        }
+
         public void OnPointerCanceled(in InteractionContext context) { }
 
-        public void OnDragBegin(in InteractionContext context) => dragStart = Transform.position;
+        public void OnDragBegin(in InteractionContext context)
+        {
+            dragStart = Transform.position;
+            dragging = true;
+            SetColor(invalidDragColor);
+        }
 
         public void OnDrag(in InteractionContext context)
         {
-            if (context.Hit.HasWorldHit)
-                Transform.position = context.Hit.WorldHit.point + context.Hit.WorldHit.normal * surfaceOffset;
+            SetColor(context.DropTarget ? validDragColor : invalidDragColor);
+            if (!context.Hit.HasWorldHit)
+                return;
+            Transform.position = context.Hit.WorldHit.point + context.Hit.WorldHit.normal * surfaceOffset;
         }
 
         public void OnDragEnd(in InteractionContext context)
         {
-            if (!context.DropTarget)
+            if (context.DropTarget)
+                placed = true;
+            else
                 Transform.position = dragStart;
+            dragging = false;
+            SetColor(originalColor);
         }
 
-        public void OnDragCanceled(in InteractionContext context) => Transform.position = dragStart;
+        public void OnDragCanceled(in InteractionContext context)
+        {
+            Transform.position = dragStart;
+            dragging = false;
+            SetColor(originalColor);
+        }
+
+        private void RestoreInitialTransform()
+        {
+            Transform.SetParent(initialParent, false);
+            Transform.localPosition = initialLocalPosition;
+            Transform.localRotation = initialLocalRotation;
+            Transform.localScale = initialLocalScale;
+            placed = false;
+        }
 
         private void SetColor(Color color)
         {

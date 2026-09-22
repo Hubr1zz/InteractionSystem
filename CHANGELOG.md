@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added placed-item reset on click, initial-transform restoration, and semi-transparent red/green drag feedback for invalid and valid drop locations in the Basic sample.
+- Added saved UI click and UI drop examples to the Basic sample, including the EventSystem, Canvas wiring, and visible orange drop landing marker.
 - Fixed ordinary collider/UI blockers being skipped and excluded physics raycasters from UI selection.
 - Expanded saturated physics buffers using complete results and reused the larger buffer on later frames.
 - Restored singleton registration after re-enable; canceled capture on unavailable input or a missed release edge.
